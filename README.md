@@ -1,6 +1,6 @@
 # AI-Marketing
 
-## 🎯 项目目标
+## 项目目标
 
 - 学习 GitHub、Git 和基础网页开发知识
 - 学习使用 ChatGPT、Codex 等 AI 工具辅助开发
