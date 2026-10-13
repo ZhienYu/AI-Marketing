@@ -1,0 +1,631 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>June's First Website</title>
+  <style>
+    :root {
+      --background: #f7f9fc;
+      --surface: #ffffff;
+      --text: #0f2747;
+      --muted: #64748b;
+      --line: #e2e8f0;
+      --blue: #2563eb;
+      --purple: #7c3aed;
+      --shadow: 0 18px 45px rgba(15, 39, 71, 0.08);
+      --radius: 18px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(37, 99, 235, 0.12), transparent 34%),
+        linear-gradient(180deg, #ffffff 0%, var(--background) 42%, #ffffff 100%);
+      line-height: 1.6;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    .site-header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      background: rgba(255, 255, 255, 0.82);
+      border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+      backdrop-filter: blur(16px);
+    }
+
+    .nav {
+      width: min(1120px, calc(100% - 40px));
+      margin: 0 auto;
+      min-height: 72px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+    }
+
+    .logo {
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: 0;
+    }
+
+    .logo span {
+      color: var(--blue);
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .nav-links a {
+      display: inline-flex;
+      min-height: 40px;
+      align-items: center;
+      padding: 0 14px;
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 15px;
+      font-weight: 700;
+      transition: color 180ms ease, background 180ms ease;
+    }
+
+    .nav-links a:hover {
+      color: var(--text);
+      background: #eef4ff;
+    }
+
+    main {
+      overflow: hidden;
+    }
+
+    .section {
+      width: min(1120px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 86px 0;
+    }
+
+    .hero {
+      min-height: calc(100vh - 72px);
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      align-items: center;
+      gap: 56px;
+      padding-top: 56px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      margin: 0 0 18px;
+      padding: 7px 12px;
+      border: 1px solid #dbeafe;
+      border-radius: 999px;
+      background: rgba(239, 246, 255, 0.9);
+      color: var(--blue);
+      font-size: 14px;
+      font-weight: 800;
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin-top: 0;
+    }
+
+    h1 {
+      max-width: 760px;
+      margin-bottom: 22px;
+      font-size: clamp(44px, 7vw, 76px);
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    h2 {
+      margin-bottom: 14px;
+      font-size: clamp(30px, 4vw, 44px);
+      line-height: 1.12;
+      letter-spacing: 0;
+    }
+
+    h3 {
+      margin-bottom: 10px;
+      font-size: 20px;
+    }
+
+    .hero-text {
+      max-width: 660px;
+      color: var(--muted);
+      font-size: 20px;
+    }
+
+    .gradient-text {
+      color: var(--blue);
+      background: linear-gradient(90deg, var(--blue), var(--purple));
+      -webkit-background-clip: text;
+      background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .button-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 32px;
+    }
+
+    .button {
+      display: inline-flex;
+      min-height: 48px;
+      align-items: center;
+      justify-content: center;
+      padding: 0 22px;
+      border: 1px solid transparent;
+      border-radius: 999px;
+      font-weight: 800;
+      transition: transform 180ms ease, box-shadow 180ms ease, background 180ms ease;
+    }
+
+    .button:hover {
+      transform: translateY(-2px);
+    }
+
+    .button-primary {
+      background: var(--text);
+      color: #ffffff;
+      box-shadow: 0 14px 28px rgba(15, 39, 71, 0.18);
+    }
+
+    .button-primary:hover {
+      background: #173b68;
+      box-shadow: 0 18px 34px rgba(15, 39, 71, 0.22);
+    }
+
+    .button-secondary {
+      background: #ffffff;
+      color: var(--text);
+      border-color: var(--line);
+    }
+
+    .button-secondary:hover {
+      background: #f8fbff;
+      box-shadow: 0 12px 24px rgba(15, 39, 71, 0.08);
+    }
+
+    .portrait-panel {
+      position: relative;
+      min-height: 460px;
+      display: grid;
+      place-items: center;
+    }
+
+    .portrait-card {
+      width: min(100%, 390px);
+      min-height: 430px;
+      padding: 30px;
+      border: 1px solid rgba(226, 232, 240, 0.9);
+      border-radius: 30px;
+      background:
+        linear-gradient(145deg, rgba(255, 255, 255, 0.96), rgba(245, 249, 255, 0.92)),
+        radial-gradient(circle at top right, rgba(124, 58, 237, 0.16), transparent 42%);
+      box-shadow: var(--shadow);
+    }
+
+    .profile-mark {
+      width: 150px;
+      height: 150px;
+      margin: 22px auto 28px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: linear-gradient(135deg, #dbeafe, #ede9fe);
+      color: var(--text);
+      font-size: 54px;
+      font-weight: 900;
+      box-shadow: inset 0 0 0 10px rgba(255, 255, 255, 0.55);
+    }
+
+    .info-list {
+      display: grid;
+      gap: 12px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .info-list li {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 0;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .info-list strong {
+      color: var(--text);
+    }
+
+    .section-intro {
+      max-width: 720px;
+      margin-bottom: 34px;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .about-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 22px;
+    }
+
+    .panel,
+    .skill-card,
+    .project-card,
+    .contact-box {
+      border: 1px solid rgba(226, 232, 240, 0.9);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.92);
+      box-shadow: 0 10px 30px rgba(15, 39, 71, 0.06);
+      transition: transform 180ms ease, box-shadow 180ms ease, border-color 180ms ease;
+    }
+
+    .panel:hover,
+    .skill-card:hover,
+    .project-card:hover,
+    .contact-box:hover {
+      transform: translateY(-4px);
+      border-color: #bfdbfe;
+      box-shadow: var(--shadow);
+    }
+
+    .panel {
+      padding: 28px;
+    }
+
+    .panel p,
+    .skill-card p,
+    .project-card p,
+    .contact-box p {
+      margin-bottom: 0;
+      color: var(--muted);
+    }
+
+    .skills-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 18px;
+    }
+
+    .skill-card {
+      padding: 24px;
+    }
+
+    .skill-icon {
+      width: 44px;
+      height: 44px;
+      display: grid;
+      place-items: center;
+      margin-bottom: 18px;
+      border-radius: 14px;
+      background: #eef4ff;
+      color: var(--blue);
+      font-weight: 900;
+    }
+
+    .projects-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+    }
+
+    .project-card {
+      min-height: 240px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      padding: 24px;
+    }
+
+    .project-status {
+      display: inline-flex;
+      width: fit-content;
+      margin-bottom: 18px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #f5f3ff;
+      color: var(--purple);
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .project-link {
+      margin-top: 24px;
+      color: var(--blue);
+      font-weight: 800;
+    }
+
+    .contact-box {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      gap: 24px;
+      padding: 34px;
+      background:
+        linear-gradient(135deg, rgba(255, 255, 255, 0.96), rgba(239, 246, 255, 0.92)),
+        radial-gradient(circle at right, rgba(124, 58, 237, 0.14), transparent 36%);
+    }
+
+    .contact-placeholder {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 48px;
+      padding: 0 18px;
+      border-radius: 999px;
+      background: #ffffff;
+      border: 1px dashed #93c5fd;
+      color: var(--muted);
+      font-weight: 800;
+    }
+
+    footer {
+      width: min(1120px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 32px 0 48px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 14px;
+    }
+
+    @media (max-width: 900px) {
+      .hero,
+      .about-grid,
+      .contact-box {
+        grid-template-columns: 1fr;
+      }
+
+      .hero {
+        min-height: auto;
+      }
+
+      .portrait-panel {
+        min-height: auto;
+      }
+
+      .skills-grid,
+      .projects-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+
+    @media (max-width: 640px) {
+      .nav {
+        width: min(100% - 28px, 1120px);
+        min-height: auto;
+        padding: 16px 0;
+        align-items: flex-start;
+        flex-direction: column;
+      }
+
+      .nav-links {
+        width: 100%;
+        overflow-x: auto;
+        padding-bottom: 2px;
+      }
+
+      .nav-links a {
+        padding: 0 12px;
+        white-space: nowrap;
+      }
+
+      .section {
+        width: min(100% - 28px, 1120px);
+        padding: 64px 0;
+      }
+
+      .hero-text,
+      .section-intro {
+        font-size: 17px;
+      }
+
+      .button {
+        width: 100%;
+      }
+
+      .portrait-card,
+      .contact-box {
+        padding: 24px;
+      }
+
+      .skills-grid,
+      .projects-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header">
+    <nav class="nav" aria-label="Main navigation">
+      <a class="logo" href="#home">June<span>.</span></a>
+      <ul class="nav-links">
+        <li><a href="#home">Home</a></li>
+        <li><a href="#about">About</a></li>
+        <li><a href="#projects">Projects</a></li>
+        <li><a href="#contact">Contact</a></li>
+      </ul>
+    </nav>
+  </header>
+
+  <main>
+    <section class="section hero" id="home">
+      <div>
+        <p class="eyebrow">Business Analytics Student</p>
+        <h1>Hello, I'm <span class="gradient-text">June</span>.</h1>
+        <div class="button-row">
+          <a class="button button-primary" href="#projects">View My Projects</a>
+          <a class="button button-secondary" href="#contact">Contact Me</a>
+        </div>
+      </div>
+
+      <div class="portrait-panel" aria-label="June profile summary">
+        <div class="portrait-card">
+          <div class="profile-mark">J</div>
+          <ul class="info-list">
+            <li><strong>Major</strong><span>Business Analytics</span></li>
+            <li><strong>University</strong><span>Wenzhou-Kean University</span></li>
+            <li><strong>Goal</strong><span>Learning by building</span></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="about">
+      <p class="eyebrow">About Me</p>
+      <h2>Connecting business thinking with AI tools.</h2>
+      <p class="section-intro">
+        My background in Business Analytics helps me understand data, users,
+        and business problems. I am now learning how AI technology can become
+        practical products that people can use.
+      </p>
+
+      <div class="about-grid">
+        <article class="panel">
+          <h3>Academic Background</h3>
+          <p>
+            I am a senior Business Analytics student at Wenzhou-Kean University.
+            I am interested in how data can explain problems and guide better
+            decisions.
+          </p>
+        </article>
+        <article class="panel">
+          <h3>Current Interest</h3>
+          <p>
+            I am learning AI Product Development, including how to turn ideas
+            into simple digital experiences with the help of AI-assisted coding.
+          </p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="skills">
+      <p class="eyebrow">Skills</p>
+      <h2>Skills I am building step by step.</h2>
+      <p class="section-intro">
+        These cards show my current learning direction. They are written as
+        learning areas, not as professional work claims.
+      </p>
+
+      <div class="skills-grid">
+        <article class="skill-card">
+          <div class="skill-icon">BA</div>
+          <h3>Business Analytics</h3>
+          <p>Understanding business questions, data, and decision-making.</p>
+        </article>
+        <article class="skill-card">
+          <div class="skill-icon">AI</div>
+          <h3>AI Applications</h3>
+          <p>Learning how AI can support product ideas and workflows.</p>
+        </article>
+        <article class="skill-card">
+          <div class="skill-icon">UX</div>
+          <h3>Product Thinking</h3>
+          <p>Thinking about user needs, simple features, and clear value.</p>
+        </article>
+        <article class="skill-card">
+          <div class="skill-icon">HT</div>
+          <h3>HTML & CSS</h3>
+          <p>Building simple web pages with structure, style, and layout.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="projects">
+      <p class="eyebrow">Projects</p>
+      <h2>Projects and practice work.</h2>
+      <p class="section-intro">
+        I am at the beginning of my learning journey, so the cards below are
+        clearly marked as placeholders or practice ideas.
+      </p>
+
+      <div class="projects-grid">
+        <article class="project-card">
+          <div>
+            <span class="project-status">Current practice</span>
+            <h3>Personal Portfolio Website</h3>
+            <p>
+              A first personal website built with HTML and CSS to introduce my
+              background and learning direction.
+            </p>
+          </div>
+          <a class="project-link" href="#home">View this page</a>
+        </article>
+        <article class="project-card">
+          <div>
+            <span class="project-status">Placeholder</span>
+            <h3>AI Product Idea</h3>
+            <p>
+              A future project space for documenting an AI product concept,
+              user problem, and simple prototype.
+            </p>
+          </div>
+          <span class="project-link">Coming soon</span>
+        </article>
+        <article class="project-card">
+          <div>
+            <span class="project-status">Placeholder</span>
+            <h3>Business Analytics Case</h3>
+            <p>
+              A future project space for a data or business analysis case from
+              coursework or personal practice.
+            </p>
+          </div>
+          <span class="project-link">Coming soon</span>
+        </article>
+      </div>
+    </section>
+
+    <section class="section" id="contact">
+      <div class="contact-box">
+        <div>
+          <p class="eyebrow">Contact</p>
+          <h2>Let's connect.</h2>
+          <p>
+            This area can hold your email, LinkedIn, GitHub, or other contact
+            information later. For now, it uses a clear placeholder.
+          </p>
+        </div>
+        <span class="contact-placeholder">Your contact info here</span>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>Designed and built by June with HTML and CSS.</p>
+  </footer>
+</body>
+</html>
