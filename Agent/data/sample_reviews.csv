@@ -1,0 +1,11 @@
+
+review_id,review_text,source_platform,source_url,brand
+1,"The battery dies before the robot finishes cleaning my pool.",synthetic,,Brand A
+2,"The cleaning performance is excellent and it picks up small debris.",synthetic,,Brand A
+3,"The robot is difficult to maintain and the filter takes too long to clean.",synthetic,,Brand A
+4,"Very easy to set up and use, but the price is too high.",synthetic,,Brand B
+5,"The battery lasts long enough to clean my entire pool.",synthetic,,Brand B
+6,"It often gets stuck near the pool steps and needs manual help.",synthetic,,Brand B
+7,"Great cleaning performance and the filter is easy to remove.",synthetic,,Brand C
+8,"Customer support was slow and the replacement parts are expensive.",synthetic,,Brand C
+9,"Compared with Brand A, this robot is easier to maintain but has shorter battery life.",synthetic,,Brand C
