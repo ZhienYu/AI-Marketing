@@ -1,0 +1,38 @@
+{
+  "1": {
+    "review_text": "The battery dies before the robot finishes cleaning my pool.",
+    "classification": {"sentiment": "Negative", "positive_aspects": [], "pain_points": ["Battery runs out before cleaning is complete"], "product_aspects": [{"aspect": "Battery Life", "sentiment": "Negative", "feedback": "Battery runs out before cleaning is complete"}]}
+  },
+  "2": {
+    "review_text": "The cleaning performance is excellent and it picks up small debris.",
+    "classification": {"sentiment": "Positive", "positive_aspects": ["Excellent cleaning performance", "Picks up small debris"], "pain_points": [], "product_aspects": [{"aspect": "Cleaning Performance", "sentiment": "Positive", "feedback": "Excellent cleaning; picks up small debris"}]}
+  },
+  "3": {
+    "review_text": "The robot is difficult to maintain and the filter takes too long to clean.",
+    "classification": {"sentiment": "Negative", "positive_aspects": [], "pain_points": ["Difficult maintenance", "Filter takes too long to clean"], "product_aspects": [{"aspect": "Maintenance", "sentiment": "Negative", "feedback": "Difficult maintenance and slow filter cleaning"}]}
+  },
+  "4": {
+    "review_text": "Very easy to set up and use, but the price is too high.",
+    "classification": {"sentiment": "Mixed", "positive_aspects": ["Easy setup and use"], "pain_points": ["High price"], "product_aspects": [{"aspect": "Ease of Use", "sentiment": "Positive", "feedback": "Easy setup and use"}, {"aspect": "Price", "sentiment": "Negative", "feedback": "High price"}]}
+  },
+  "5": {
+    "review_text": "The battery lasts long enough to clean my entire pool.",
+    "classification": {"sentiment": "Positive", "positive_aspects": ["Battery lasts for a full pool cleaning"], "pain_points": [], "product_aspects": [{"aspect": "Battery Life", "sentiment": "Positive", "feedback": "Battery lasts for a full pool cleaning"}]}
+  },
+  "6": {
+    "review_text": "It often gets stuck near the pool steps and needs manual help.",
+    "classification": {"sentiment": "Negative", "positive_aspects": [], "pain_points": ["Gets stuck near pool steps", "Requires manual assistance"], "product_aspects": [{"aspect": "Reliability", "sentiment": "Negative", "feedback": "Often gets stuck near pool steps and requires manual help"}]}
+  },
+  "7": {
+    "review_text": "Great cleaning performance and the filter is easy to remove.",
+    "classification": {"sentiment": "Positive", "positive_aspects": ["Great cleaning performance", "Easy filter removal"], "pain_points": [], "product_aspects": [{"aspect": "Cleaning Performance", "sentiment": "Positive", "feedback": "Great cleaning performance"}, {"aspect": "Maintenance", "sentiment": "Positive", "feedback": "Easy filter removal"}]}
+  },
+  "8": {
+    "review_text": "Customer support was slow and the replacement parts are expensive.",
+    "classification": {"sentiment": "Negative", "positive_aspects": [], "pain_points": ["Slow customer support", "Expensive replacement parts"], "product_aspects": [{"aspect": "Customer Support", "sentiment": "Negative", "feedback": "Slow customer support"}, {"aspect": "Price", "sentiment": "Negative", "feedback": "Expensive replacement parts"}]}
+  },
+  "9": {
+    "review_text": "Compared with Brand A, this robot is easier to maintain but has shorter battery life.",
+    "classification": {"sentiment": "Mixed", "positive_aspects": ["Easier maintenance compared with Brand A"], "pain_points": ["Shorter battery life compared with Brand A"], "product_aspects": [{"aspect": "Maintenance", "sentiment": "Positive", "feedback": "Easier maintenance compared with Brand A"}, {"aspect": "Battery Life", "sentiment": "Negative", "feedback": "Shorter battery life compared with Brand A"}]}
+  }
+}

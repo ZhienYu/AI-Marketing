@@ -24,7 +24,8 @@ def usable_url(value):
         return False
 
 
-def validate_reviews(path):
+def load_reviews(path):
+    valid_reviews = []
     report = {
         "total_records": 0,
         "valid_records": 0,
@@ -86,6 +87,7 @@ def validate_reviews(path):
             seen_rows[signature] = line
             seen_ids[review_id] = line
             report["valid_records"] += 1
+            valid_reviews.append(values)
 
             brand = values["brand"]
             if not brand or brand.casefold() == "unknown":
@@ -108,6 +110,11 @@ def validate_reviews(path):
     report["duplicate_records"] = len(report["duplicates"])
     report["excluded_records"] = report["invalid_records"] + report["duplicate_records"]
     report["valid_records_by_brand"] = dict(sorted(brands.items()))
+    return report, valid_reviews
+
+
+def validate_reviews(path):
+    report, _ = load_reviews(path)
     return report
 
 
