@@ -5,6 +5,63 @@ An AI-powered tool for consumer insights and competitive intelligence.
 ## Project Status
 MVP Development
 
+## Milestone 2.5：离线 Markdown 市场调研报告
+
+新增 `generate_report.py`。报告不调用 Qwen，不加载 `.env`，不改写分类或统计 JSON。
+默认读取现有的三个输入：
+
+- `outputs/test/insights_mock.json`
+- `outputs/test/classification_mock.json`
+- `data/sample_reviews.csv`
+
+在 Mac VS Code 中打开 `AI-Marketing` 文件夹，选择「终端 → 新建终端」，运行：
+
+```sh
+python3 -m unittest discover -s Agent/tests -v
+python3 Agent/generate_report.py
+```
+
+在左侧展开 `Agent → outputs → test`，打开 `market_research_report.md`。
+按 **Command+Shift+V** 打开 Markdown Preview；也可在编辑器右上角选择「打开侧边预览」。
+这份报告使用现有九条合成评论及 Mock 分类，标题附近显示 `DEMO — SYNTHETIC DATA`，
+包含 Executive Summary、Consumer Pain Points、Consumer Sentiment、Competitive Intelligence、
+Business Opportunities、Sources & Methodology 六部分。
+
+报告生成前会重新汇总分类并与输入 insights 完整比对；不一致时停止，请先用匹配的分类重新生成统计。
+还会核对 CSV 中的原始 ID、品牌、来源和已有内容指纹；找不到对应原文或内容变化时拒绝生成。
+报告保存为 UTF-8 Markdown，成功生成后可以重复覆盖这份报告；不会覆盖输入 JSON 或 CSV。
+没有输入文件、没有成功分类、格式错误或证据不匹配时返回退出码 2，旧报告保持不变；成功为 0。
+
+当前合成数据也已有真实 Qwen 分类时，可选择以下**纯离线**命令生成报告：
+
+```sh
+python3 Agent/generate_report.py --insights Agent/outputs/test/insights_qwen.json --classifications Agent/outputs/test/classification_qwen_resume.json
+```
+
+这仍然是 synthetic demo，且会覆盖同一份 `market_research_report.md`；输入文件不变。
+如果需离线重新生成匹配的 Qwen 统计，先运行：
+
+```sh
+python3 Agent/generate_insights.py --input Agent/outputs/test/classification_qwen_resume.json
+```
+
+报告规则：每条评论对同一属性、同一情绪只计一次；每品牌显示成功分类样本量。
+少于 20 条标记 `Insufficient Data`；不排名，不把零提及当作满意，不填造缺失来源链接。
+原文和分类反馈分列，保留全部支持 ID。痛点文字仅规范大小写和空白，不自动合并语义。
+商业机会最多三项，至少需要两条独立负面属性评论支持，明确标为待验证假设；
+不足时显示 `Insufficient Evidence`。合成样本不能支持真实市场商业建议。
+
+未来真实数据要求显式指定全部输入，且不能包含 synthetic 或 Mock 分类：
+
+```sh
+python3 Agent/generate_report.py --dataset real --insights /path/to/insights_qwen.json --classifications /path/to/classifications.json --reviews /path/to/authorized_reviews.csv
+```
+
+未来输出为 `outputs/real/market_research_report.md`；本阶段不运行真实数据流程。
+所有报告继续由现有 `outputs` 忽略规则排除，不自动 Commit 或 Push。
+新测试 `tests/test_generate_report.py` 覆盖六部分结构、样本与品牌计数、证据、去重、
+陈旧统计拒绝、缺失输入、数据隔离及输入文件不被改写。
+
 ## 输出目录隔离
 
 ```text
