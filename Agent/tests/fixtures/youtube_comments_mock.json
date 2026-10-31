@@ -1,0 +1,10 @@
+{
+  "kind": "youtube#commentThreadListResponse",
+  "nextPageToken": "MOCK_PAGE_MUST_NOT_BE_REQUESTED",
+  "items": [
+    {"id": "synthetic-thread-1", "snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "synthetic-comment-1", "snippet": {"textDisplay": "SYNTHETIC TEST: How long does a cleaning cycle take?", "publishedAt": "2026-01-01T00:00:00Z"}}}},
+    {"id": "synthetic-thread-2", "snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "synthetic-comment-2", "snippet": {"textDisplay": "SYNTHETIC TEST: Please show the filter removal process.", "publishedAt": "2026-01-02T00:00:00Z"}}}},
+    {"id": "synthetic-thread-3", "snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "synthetic-comment-3", "snippet": {"textDisplay": "SYNTHETIC TEST: Does this model work on pool steps?", "publishedAt": "2026-01-03T00:00:00Z"}}}},
+    {"id": "synthetic-thread-4", "snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "synthetic-comment-4", "snippet": {"textDisplay": "SYNTHETIC TEST: Is there a maintenance guide?", "publishedAt": "2026-01-04T00:00:00Z"}}}}
+  ]
+}

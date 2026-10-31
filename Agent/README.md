@@ -5,6 +5,96 @@ An AI-powered tool for consumer insights and competitive intelligence.
 ## Project Status
 MVP Development
 
+## Milestone 2.6：YouTube 公开评论只读预览
+
+独立程序 `youtube_comments.py`，仅使用 Python 标准库，不改变 Qwen、洞察及报告模块。
+默认 Mock 离线模式，不读取 `.env`，不联网；只有你显式加 `--live` 时才使用本机密钥。
+本阶段开发不主动请求真实 YouTube API，也不把真实评论交给任何 AI 服务。
+
+### Mac VS Code 操作
+
+打开 `AI-Marketing` 文件夹，选择「终端 → 新建终端」，先运行：
+
+```sh
+python3 -B -m unittest discover -s Agent/tests -v
+python3 -B Agent/youtube_comments.py
+```
+
+应看到 `OK`，以及 `MOCK — SYNTHETIC DATA; no API request`。
+Mock fixture 有四条合成评论，只预览前三条；链接仅是使用合成 ID 构造的格式示例，不是真实来源。
+测试中的 `--live` 也全部使用假凭证和 Mock 网络，不会读取你的实际 `.env`。
+
+### 自己运行首次真实读取
+
+你已经在 `Agent/.env` 中配置 `YOUTUBE_API_KEY`；不要把其值放入命令或聊天。
+程序从脚本旁的 `.env` 读取这一个配置，不采用 Qwen Key、不执行文件命令、也不做环境变量展开。
+支持 `YOUTUBE_API_KEY=值`、单/双引号以及 `export YOUTUBE_API_KEY=值`；重复定义会报错。
+API restrictions 应仅允许 **YouTube Data API v3**，同时确认该服务已在密钥所属项目启用。
+
+把下方引号中的内容替换成你自己选的视频完整链接，保留双引号和 `--live`：
+
+```sh
+python3 -B Agent/youtube_comments.py --live "https://www.youtube.com/watch?v=你的视频ID"
+```
+
+上面是替换模板，不能原样执行。也可以只传真实的 11 位 Video ID：
+
+```sh
+python3 -B Agent/youtube_comments.py --live "你的视频ID"
+```
+
+支持标准 watch 链接、youtu.be 短链接、shorts、embed、live 链接；不会下载视频。
+URL 中可能含 `&`，务必加双引号。不带 `--live` 时始终只看合成样例，不能据此认定真实 API 成功。
+
+### 成功时应该看到什么
+
+终端出现 `LIVE — official API response`，随后：
+
+```text
+Retrieved N public top-level comment(s); previewing at most 3. No pagination.
+[1] comment_id=...; brand=unknown
+published_at=...; video_id=...; source_platform=youtube
+评论正文预览
+评论定位链接
+```
+
+`N` 在 0–10 之间，并非所有视频都有十条公开评论。请求成功但没有评论时会明确说明。
+每条正文最多显示 240 字符，去除终端控制字符；模块在内存中保留本页最多十条完整正文，退出后不持久化。
+字段为 `comment_id`、`review_text`、`published_at`、`video_id`、`source_url`、
+`source_platform=youtube`、`brand=unknown`，另有 `is_synthetic` 区分 Mock 和真实返回。
+ID 来自 `topLevelComment.id`，不是外层线程 ID。
+
+### 请求边界
+
+- 只访问官方 `commentThreads.list`，固定 `part=snippet`、`maxResults=10`、`textFormat=plainText`、`order=time`。
+- 仅一次 GET，不自动翻页、不读回复、不查询视频标题、不自动重试；不保存真实评论到 CSV、JSON 或日志文件。
+- 仅请求必要字段，不读取评论作者姓名、头像等信息。终端预览本身包含真实文本，请勿额外重定向到文件或上传终端截图。
+- 按官方文档该接口一次调用消耗 1 个配额单位；这与 Qwen Token 无关，重复执行会再消耗 API 配额。
+- 使用公共 `textDisplay`，不是声称取得作者专属的 `textOriginal`；即使纯文本也可能与用户最初提交的文本不同。
+- `source_url` 由返回的视频 ID 和评论 ID 构造，不是 API 提供的永久链接字段；评论删除、隐藏后可能无法打开。
+- 不推断品牌、真实使用经历、情绪或竞品关系。只读测试成功不等于获准将数据用于后续 AI 衍生分析；后续另行确认用途。
+- 退出码 `0` 表示成功预览（包括零条），`2` 表示配置、参数、请求或响应错误。
+
+参考：[commentThreads.list](https://developers.google.com/youtube/data/reference/rest/v3/commentThreads/list)、
+[评论字段](https://developers.google.com/youtube/data/reference/rest/v3/comments)。
+
+### 常见错误
+
+| 提示/情况 | 处理 |
+|---|---|
+| 缺少或无法读取 YOUTUBE_API_KEY | 自行确认 `Agent/.env` 路径、变量名、UTF-8 编码及引号完整；不要发出密钥 |
+| Invalid video | 使用实际的 11 位 ID 或支持的视频链接，不使用频道/播放列表链接 |
+| commentsDisabled | 视频关闭了评论，换一个已开启评论的公开视频 |
+| accessNotConfigured | 在密钥所属 Google Cloud 项目启用 YouTube Data API v3 |
+| 400 / key rejected | 检查本地 Key 是否有效、是否粘贴完整、是否属于正确项目 |
+| 403 / restrictions | 检查 API restrictions、配额和应用限制；终端调用不适用网页 HTTP referrer 限制，可配置匹配的出口 IP |
+| quotaExceeded / dailyLimitExceeded | 查看 Cloud Console 的实际用量与重置时间，不要循环重试或另开项目绕过 |
+| videoNotFound / 404 | 核对 ID；视频可能已删除、私有或对该请求不可用 |
+| 超时、连接失败、429、服务错误 | 检查本机访问 Google APIs 的网络及服务状态，等待后自行重试；不要绕过服务地域限制 |
+
+新增测试 `tests/test_youtube_comments.py`，fixture 在 `tests/fixtures/youtube_comments_mock.json`，
+二者仅包含合成示例与假凭证。没有改动现有分析输出或添加真实评论文件。
+
 ## Milestone 2.5：离线 Markdown 市场调研报告
 
 新增 `generate_report.py`。报告不调用 Qwen，不加载 `.env`，不改写分类或统计 JSON。
