@@ -6,6 +6,7 @@ import csv
 import io
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import mkdtemp
 
@@ -111,7 +112,8 @@ def preview_live_video(discovery, video_id, *, live=False):
     if video_id not in {video["video_id"] for video in discovery["videos"][:youtube_search.MAX_VIDEOS]}:
         raise ValueError("Choose a video from this search result; no comment request was sent.")
     comments = youtube_comments.fetch_comments(video_id, youtube_comments.load_youtube_key())[:youtube_comments.MAX_COMMENTS]
-    return {"mode": "live-read-only", "video_id": video_id, "comments": comments}
+    return {"mode": "live-read-only", "video_id": video_id, "comments": comments,
+            "collected_at": datetime.now(timezone.utc).isoformat()}
 
 
 def display_videos(discovery):
