@@ -1,11 +1,14 @@
 """Preview up to ten public YouTube top-level comments; offline Mock by default."""
 
 import argparse
+import errno
 import json
 import re
+import socket
+import ssl
 import sys
 import unicodedata
-from http.client import HTTPException
+from http.client import HTTPException, IncompleteRead, RemoteDisconnected
 from pathlib import Path
 from urllib import error, parse, request
 
@@ -121,17 +124,73 @@ def normalize_comments(payload, video_id, *, synthetic=False):
     return comments
 
 
+def network_failure_message(failure, stage):
+    cause = failure
+    wrapped = isinstance(failure, error.URLError)
+    for _ in range(3):
+        if isinstance(cause, error.URLError) and isinstance(cause.reason, BaseException) and cause.reason is not cause:
+            cause = cause.reason
+        else:
+            break
+    known_types = (
+        (socket.gaierror, "gaierror"),
+        (ssl.SSLCertVerificationError, "SSLCertVerificationError"), (ssl.SSLError, "SSLError"),
+        (TimeoutError, "TimeoutError"), (RemoteDisconnected, "RemoteDisconnected"),
+        (ConnectionResetError, "ConnectionResetError"), (ConnectionRefusedError, "ConnectionRefusedError"),
+        (BrokenPipeError, "BrokenPipeError"), (IncompleteRead, "IncompleteRead"),
+        (error.URLError, "URLError"), (HTTPException, "HTTPException"), (OSError, "OSError"),
+        (RuntimeError, "RuntimeError"), (ValueError, "ValueError"), (TypeError, "TypeError"),
+    )
+    exception_type = next((label for kind, label in known_types if isinstance(cause, kind)), "Exception")
+    if wrapped and cause is not failure:
+        exception_type = "URLError(" + exception_type + ")"
+    if isinstance(cause, socket.gaierror):
+        category, detail = "dns", "DNS resolution failed. Check local DNS/network access."
+    elif isinstance(cause, ssl.SSLCertVerificationError):
+        category, detail = "ssl_certificate", "TLS certificate verification failed. Check system time, certificates and network interception; do not disable verification."
+    elif isinstance(cause, ssl.SSLError):
+        category, detail = "ssl", "SSL/TLS operation failed."
+    elif isinstance(cause, TimeoutError) or (isinstance(cause, OSError) and cause.errno == errno.ETIMEDOUT):
+        category = "read_timeout" if stage in {"read", "read_error_body"} else "open_timeout"
+        detail = "Read timeout while receiving the response body." if category == "read_timeout" else "Timeout opening the response; connect, proxy/TLS or response-header wait cannot be distinguished by urllib here."
+    elif isinstance(cause, (RemoteDisconnected, ConnectionResetError)):
+        category, detail = "connection_reset", "Connection was reset or closed before the operation completed."
+    elif isinstance(cause, ConnectionRefusedError):
+        category, detail = "connection_refused", "Connection refused. Check local network/proxy settings."
+    elif isinstance(cause, IncompleteRead):
+        category, detail = "incomplete_read", "Response body ended before all expected bytes arrived."
+    elif isinstance(cause, HTTPException):
+        category, detail = "http_protocol", "HTTP transport/protocol operation failed; no API reason was received."
+    elif isinstance(cause, (OSError, error.URLError)):
+        category, detail = "network_other", "Network/OS error without a more specific safe classification."
+    else:
+        category, detail = "unexpected", "Unexpected request-processing exception; raw details omitted."
+    return f"[category={category}; stage={stage}; exception={exception_type}] {detail} No automatic retry."
+
+
 def http_failure_message(failure):
-    reason = None
+    reasons = []
+    status = None
+    body_diagnostic = None
+    api_error = False
     try:
         payload = json.loads(failure.read(65536))
-        reason = payload["error"]["errors"][0]["reason"]
-    except (OSError, ValueError, KeyError, IndexError, TypeError, HTTPException):
-        pass
+        details = payload["error"]
+        api_error = isinstance(details, dict)
+        if api_error:
+            status = details.get("status")
+            for field in ("errors", "details"):
+                if isinstance(details.get(field), list):
+                    reasons.extend(item.get("reason") for item in details[field] if isinstance(item, dict))
+    except (ValueError, KeyError, TypeError):
+        body_diagnostic = "API error body is absent or not valid JSON."
+    except Exception as body_failure:
+        body_diagnostic = network_failure_message(body_failure, "read_error_body")
     finally:
-        failure.close()
-    if not isinstance(reason, str):
-        reason = None
+        try:
+            failure.close()
+        except Exception:
+            pass
     messages = {
         "commentsDisabled": "Comments are disabled for this video. Choose another public video.",
         "quotaExceeded": "YouTube daily quota exceeded. Check Google Cloud Quotas and retry after reset.",
@@ -140,13 +199,30 @@ def http_failure_message(failure):
         "ipRefererBlocked": "API key application restrictions rejected this terminal request. Check permitted IPs/application settings.",
         "keyInvalid": "API key rejected. Check YOUTUBE_API_KEY locally and its project restrictions.",
         "videoNotFound": "Video not found or unavailable to this request. Check the URL and visibility.",
+        "forbidden": "YouTube denied access to the requested comment threads.",
+        "processingFailure": "YouTube could not process the request. Check the request/video before manually retrying.",
+        "channelNotFound": "YouTube channel not found.",
+        "commentThreadNotFound": "YouTube comment thread not found or no longer available.",
+        "rateLimitExceeded": "YouTube rate limit reached. Wait before manually retrying.",
+        "backendError": "YouTube backend error. Check service availability before manually retrying.",
+        "API_KEY_INVALID": "API key rejected. Check the local key and its project.",
+        "API_KEY_SERVICE_BLOCKED": "API key restrictions do not permit this service. Check YouTube Data API v3 access.",
+        "API_KEY_HTTP_REFERRER_BLOCKED": "API key HTTP referrer restrictions do not permit this terminal request.",
+        "API_KEY_IP_ADDRESS_BLOCKED": "API key IP restrictions do not permit this request's network.",
+        "SERVICE_DISABLED": "Enable YouTube Data API v3 in the project that owns this API key.",
     }
-    return messages.get(reason, {
+    reason = next((value for value in reasons if isinstance(value, str) and value in messages), None)
+    safe_statuses = {"PERMISSION_DENIED", "NOT_FOUND", "INVALID_ARGUMENT", "RESOURCE_EXHAUSTED", "UNAUTHENTICATED", "INTERNAL", "UNAVAILABLE", "DEADLINE_EXCEEDED"}
+    status = status if isinstance(status, str) and status in safe_statuses else "unavailable"
+    code = failure.code if type(failure.code) is int and 100 <= failure.code <= 599 else "unknown"
+    prefix = f"[category={'youtube_api' if api_error else 'http'}; stage=http_response; http={code}; reason={reason or 'unrecognized_or_unavailable'}; status={status}] "
+    message = messages.get(reason, {
         400: "Request rejected. Check the video ID, local API key and API configuration.",
         403: "Access denied. Check API enablement, key restrictions, permissions and quota.",
         404: "Video not found or unavailable. Check the URL and visibility.",
         429: "YouTube rate limit reached. Wait before manually retrying.",
     }.get(failure.code, "YouTube service request failed. Check service availability before manually retrying."))
+    return prefix + message + (" " + body_diagnostic if body_diagnostic else "") + " No automatic retry."
 
 
 def fetch_comments(video_id, api_key):
@@ -159,18 +235,26 @@ def fetch_comments(video_id, api_key):
         "key": api_key,
     }
     api_request = request.Request(ENDPOINT + "?" + parse.urlencode(parameters), headers={"Accept": "application/json"}, method="GET")
+    stage = "open"
     try:
         with request.build_opener(NoRedirect()).open(api_request, timeout=30) as response:
+            stage = "read"
             raw = response.read(MAX_RESPONSE_BYTES + 1)
+            stage = "close"
+        stage = "decode"
         if len(raw) > MAX_RESPONSE_BYTES:
             raise YouTubeReadError("Response exceeded the preview size limit. No retry.")
         payload = json.loads(raw)
     except error.HTTPError as failure:
         raise YouTubeReadError(http_failure_message(failure)) from None
-    except (error.URLError, TimeoutError, OSError, HTTPException):
-        raise YouTubeReadError("Connection failed or timed out. No automatic retry; check network access to Google APIs.") from None
+    except YouTubeReadError:
+        raise
+    except (error.URLError, TimeoutError, OSError, HTTPException) as failure:
+        raise YouTubeReadError(network_failure_message(failure, stage)) from None
     except (ValueError, UnicodeError):
-        raise YouTubeReadError("YouTube returned invalid JSON. No automatic retry.") from None
+        raise YouTubeReadError("[category=invalid_json; stage=decode] YouTube returned invalid JSON. No automatic retry.") from None
+    except Exception as failure:
+        raise YouTubeReadError(network_failure_message(failure, stage)) from None
     return normalize_comments(payload, video_id)
 
 
