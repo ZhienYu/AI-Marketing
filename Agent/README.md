@@ -5,6 +5,157 @@ An AI-powered tool for consumer insights and competitive intelligence.
 ## Project Status
 MVP Development
 
+## YouTube 有限网络重试（当前行为）
+
+搜索和评论读取现在共用 `youtube_comments.request_json`：每个单页读取最多 **2 次请求（首次＋1 次重试）**，
+不改变 `search_videos(query, api_key)`、`fetch_comments(video_id, api_key)` 的接口，Orchestrator 直接复用。
+
+- 只有可识别的暂时网络故障才重试：连接重置/中断、打开或正文读取超时、连接提前关闭/正文未读完整，以及临时 DNS 错误 EAI_AGAIN。
+- 首次暂时故障后等待 **0.5 秒**，重新请求同一页；部分响应丢弃，不拼接为额外评论。
+- 最多五个视频、十条评论、预览三条，不翻页。第二次仍失败就停止，不另选视频或无限重试。
+- 明确 HTTP/API 错误一律不重试，包括 400/401/403/404、commentsDisabled、权限错误、无效 Key、配额耗尽、429、503。
+- 证书/SSL 错误、非临时 DNS 错误、连接拒绝、未知异常、无效 JSON/结构和超大响应不重试；不禁用 TLS 校验。
+- 即使 HTTP 错误正文读取超时，也保留已知 HTTP 状态并停止，不把它当作可重试的普通网络故障。
+- 已读完正文后关闭响应出错也不再次请求，避免无必要的额外调用。
+
+终端 stderr 显示固定操作名和当前次数，例如：
+
+```text
+[youtube:comments; attempt=1/2] Requesting one page.
+[youtube:comments; attempt=1/2] [category=connection_reset; stage=open; exception=URLError(ConnectionResetError)] ... Retrying once after 0.5s.
+[youtube:comments; attempt=2/2] Requesting one page.
+```
+
+原有 category、stage、exception、HTTP 状态和固定 API 原因仍保留；不显示 Key、完整请求 URL、请求头或原始异常正文。
+一次 Orchestrator Live 流程的上限是搜索两次＋选片后评论两次，合计最多四次 HTTP 尝试；取消选片则没有评论请求。
+重试也可能消耗额外配额。打开响应仍无法区分 TCP 连接、TLS、代理和等待响应头哪个具体环节超时。
+根地址能返回 HTTP 404 只说明当时可建立连接，不能排除后续具体 API 请求的偶发连接重置。
+
+本次只运行离线 Mock 测试，新增 `tests/test_youtube_retry.py`，等待函数在测试中被替换，不实际等待或联网。
+你可先运行全部测试，再自行执行下面任一真实命令：
+
+```sh
+python3 -B -m unittest discover -s Agent/tests -v
+python3 -B Agent/youtube_comments.py --live "HyIXFKNTyf8"
+python3 -B Agent/youtube_search.py --live "Robotic Pool Cleaner"
+python3 -B Agent/orchestrator.py --live "Robotic Pool Cleaner"
+```
+
+真实命令仅由你决定是否运行。不会保存真实评论、调用 Qwen、生成真实分析或自动 Commit/Push。
+
+## Milestone 2.9：统一流程入口 Orchestrator
+
+新增 `orchestrator.py`，默认完整 Mock；真实模式严格限定为 Live Read-only。
+复用现有搜索、评论归一化、反馈资格识别、CSV 校验、Mock 分类、洞察汇总和 Markdown 报告函数，
+不改写这些模块。用户不需要手工准备 CSV；Mock 内部生成合成 CSV 以复用现有校验与证据逻辑。
+
+### 一条命令测试完整 Mock
+
+在 Mac VS Code 打开 `AI-Marketing` 文件夹，选择「终端 → 新建终端」，在仓库根目录运行：
+
+```sh
+python3 -B Agent/orchestrator.py "Robotic Pool Cleaner"
+```
+
+整个过程不读取 `.env`、不联网、不消耗 Token。
+预期显示 `DEMO — SYNTHETIC DATA`、5 个合成视频、10 条合成评论和 3 条成功分析的使用体验候选，
+以及最终报告的完整路径。Mock 结果是固定样例，不是根据任意输入真的搜索到产品或调用了 Qwen。
+默认选取合成搜索结果中的第一个视频，无需人工选片。
+
+每次运行新建一个目录，避免覆盖之前的成果：
+
+```text
+Agent/outputs/test/pipeline/mock-<独立运行编号>/
+  discovery.json
+  synthetic_reviews.csv
+  qualification.json
+  feedback_groups.json
+  classifications.json
+  insights.json
+  pipeline_summary.json
+  market_research_report.md
+```
+
+终端路径可直接点击；也可以在 VS Code 文件列表展开对应目录，打开报告后按 Command+Shift+V 预览。
+所有生成文件仍由现有 `outputs/test/.gitignore` 忽略，旧分类结果和报告不变。
+
+新增合成评论涵盖：使用体验、购买咨询、产品讨论、视频内容反馈和无关互动。
+只有 `eligible_as_usage_review` 进入本次 Mock 产品分析；两个一般产品意见/事实候选另存，
+购买咨询（包括 `price?`）、视频反馈、无关内容与歧义项不合并成产品好评或差评。
+`feedback_groups.json` 保存各类对应 ID；分类可以重叠，不把类型数量相加当作总评论数。
+unknown 品牌和含糊的使用目标不能因视频标题或选择顺序被补成已知品牌。
+
+报告新增流程数据质量说明，保留 `SYNTHETIC DATA`、`Insufficient Data`、来源证据和限制。
+例子中的 DemoAqua / DemoPool 是虚构品牌，样本量仅 1 / 2；原报告默认 Brand A/B/C 占位行无样本时为 0，
+不能据此形成品牌优劣结论。没有可用使用体验或成功分类时，仅输出 Insufficient Evidence，不编造完整研究结论。
+合成原始评论不附伪造的真实来源链接，模拟视频信息仅用于流程测试。
+
+### 单独测试 Live Read-only 搜索
+
+只有你明确运行以下命令时，本机程序才读取 YouTube Key 并请求一页搜索结果（暂时网络错误时最多两次尝试）：
+
+```sh
+python3 -B Agent/orchestrator.py --live --search-only "Robotic Pool Cleaner"
+```
+
+最多显示五个视频，保留官方相关性顺序，不翻页、不自动读取评论，不保存搜索结果。
+搜索无结果时立即停止，不虚构候选。
+
+### 搜索后手动选片，再读取评论
+
+```sh
+python3 -B Agent/orchestrator.py --live "Robotic Pool Cleaner"
+```
+
+程序先搜索最多五个视频，随后停下来等待输入：
+
+```text
+Choose one video number (1-5), or q to cancel:
+```
+
+输入屏幕上某个编号并回车，才开始评论读取（暂时网络错误时最多两次尝试）；输入 q 取消则不读取评论。
+最多读取十条公开顶层评论、最多预览三条。若选片无效或评论关闭，停止并提示，不自动换片或重试明确 API 错误。
+Live 评论的 `brand` 保持 unknown，不送入资格筛选、Qwen、洞察或报告，不写 CSV、JSON 或评论日志。
+不要重定向终端输出到文件；真实请求仍消耗 YouTube 配额，重复运行会再次搜索。
+
+也可以显式提供从上一次搜索看到的真实 ID：
+
+```sh
+python3 -B Agent/orchestrator.py --live "Robotic Pool Cleaner" --video-id "你选中的11位视频ID"
+```
+
+这是替换模板，不能原样运行。程序仍会发起本轮搜索，且 ID 必须属于本轮结果，否则不读取评论。
+若仅想对已知 ID 读取评论、不再搜索，继续使用原来的独立命令：
+
+```sh
+python3 -B Agent/youtube_comments.py --live "你选中的11位视频ID"
+```
+
+以上真实命令由你自己决定是否执行；开发与自动化测试仅使用 Mock 网络和假凭证。
+没有新增实际密钥文件或真实 YouTube 评论测试文件。
+
+### 模块接口与后续 UI
+
+- `run_mock_pipeline(query, output_root=None)`：完整合成流水线，返回摘要与报告路径；每次创建独立运行目录。
+- `discover_live_videos(query, live=True)`：仅搜索，返回内存中的候选列表。
+- `preview_live_video(discovery, video_id, live=True)`：校验选片属于当前搜索后，仅返回内存中的评论预览数据。
+
+Live 接口默认 `live=False` 并拒绝请求；必须显式传 True。交互输入仅在 CLI `main()` 内，
+后续 Streamlit 可分别用“搜索”按钮、候选下拉框、“读取评论”按钮调用上述接口，不需要调用终端或准备 CSV。
+本阶段没有 Live 分析开关；不能通过换输出目录或额外参数将真实评论带入 Mock 流程。
+后续多数据源适配器可返回统一候选和评论结构，但需单独处理来源许可、保留期限、原文证据及人工复核。
+
+运行全部离线测试：
+
+```sh
+python3 -B -m unittest discover -s Agent/tests -v
+```
+
+新增 `tests/test_orchestrator.py` 和 `tests/fixtures/pipeline_synthetic.json`，
+验证端到端 Mock、分流、输入真实性标记、重复运行不覆盖、空样本/分类失败、Live 人工选择、
+取消/错误时无追加请求，以及 Live 不筛选、不分析、不写文件。
+退出码：0=流程成功，1=Mock 存在分类失败，2=输入/选择/API/文件错误，130=人工中断或输入流结束。
+
 ## Milestone 2.8：Consumer Feedback Qualification（合成数据最小版）
 
 新增独立 `qualify_feedback.py`，以保守英文规则实际识别输入，不调用 AI，也不是按 review_id 查预设标签。
@@ -129,8 +280,8 @@ python3 -B Agent/youtube_comments.py --live "aMdQpJ9ur5E"
 python3 -B Agent/youtube_comments.py --live "KCOkaweKnu0"
 ```
 
-第一条可作已知曾成功的对照，但不保证本次也成功。每条命令最多一次请求、十条顶层评论，
-最多预览三条，不保存评论、不调用 Qwen、不自动重试。
+第一条可作已知曾成功的对照，但不保证本次也成功。每条命令最多两次请求、十条顶层评论，
+最多预览三条，不保存评论、不调用 Qwen；只对暂时网络异常重试一次。
 可反馈 `category`、`stage`、`exception`、`http` 和 `reason` 帮助定位，无需提供密钥或评论正文。
 
 ## Milestone 2.7：按产品关键词发现 YouTube 视频
@@ -171,7 +322,7 @@ https://www.youtube.com/watch?v=...
 ```
 
 `N` 可以为 0–5；少于五条不会自动补页，没有结果时会明确提示，不编造视频。
-只发送一次官方 `search.list` 请求：`part=snippet`、`type=video`、`order=relevance`、`maxResults=5`。
+只读取一页官方 `search.list` 结果，暂时网络错误时最多两次尝试：`part=snippet`、`type=video`、`order=relevance`、`maxResults=5`。
 使用 YouTube 默认的相关性顺序，不自行评分或重排。不会查询频道详情、播放视频、下载视频或获取评论。
 结果只在终端展示，不写入文件。返回结构中的 `title`、`channel_title`、`published_at`、
 `video_id`、`video_url` 可供后续候选筛选模块使用；当前没有自动选片或品牌归属推断。
@@ -205,7 +356,7 @@ python3 -B Agent/youtube_comments.py --live "选定视频的11位ID"
 - 缺少关键词、空白或超长关键词：先在本地报错，不读 Key、不发请求。
 - 400：核对关键词、Key 和项目配置。
 - 403：检查 API 是否启用、Key 的 API／应用限制、Search Queries 的实际配额。
-- 429、超时或网络错误：不自动重试，确认网络和配额后自行再运行。
+- 429 等明确 HTTP 错误不自动重试；暂时性超时或连接故障仅重试一次，最终失败后自行检查网络和配额。
 - 空结果：改用更具体或不同的产品词；不是程序失败，也不构成市场不存在的证据。
 - 错误不会输出 Key、带 Key 的请求地址或原始服务错误正文。不要把 Key 放进命令、截图或聊天。
 
@@ -277,7 +428,7 @@ ID 来自 `topLevelComment.id`，不是外层线程 ID。
 ### 请求边界
 
 - 只访问官方 `commentThreads.list`，固定 `part=snippet`、`maxResults=10`、`textFormat=plainText`、`order=time`。
-- 仅一次 GET，不自动翻页、不读回复、不查询视频标题、不自动重试；不保存真实评论到 CSV、JSON 或日志文件。
+- 仅单页 GET，暂时网络错误时最多两次尝试；不翻页、不读回复、不查询视频标题，不保存真实评论到 CSV、JSON 或日志文件。
 - 仅请求必要字段，不读取评论作者姓名、头像等信息。终端预览本身包含真实文本，请勿额外重定向到文件或上传终端截图。
 - 按官方文档该接口一次调用消耗 1 个配额单位；这与 Qwen Token 无关，重复执行会再消耗 API 配额。
 - 使用公共 `textDisplay`，不是声称取得作者专属的 `textOriginal`；即使纯文本也可能与用户最初提交的文本不同。

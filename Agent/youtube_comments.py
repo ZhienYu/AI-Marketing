@@ -7,6 +7,7 @@ import re
 import socket
 import ssl
 import sys
+import time
 import unicodedata
 from http.client import HTTPException, IncompleteRead, RemoteDisconnected
 from pathlib import Path
@@ -18,6 +19,8 @@ ENDPOINT = "https://www.googleapis.com/youtube/v3/commentThreads"
 MAX_COMMENTS = 10
 MAX_PREVIEW = 3
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_REQUEST_ATTEMPTS = 2
+RETRY_DELAY_SECONDS = 0.5
 MOCK_VIDEO_ID = "TESTvideo01"
 VIDEO_ID_PATTERN = re.compile(r"[A-Za-z0-9_-]{11}")
 
@@ -124,14 +127,32 @@ def normalize_comments(payload, video_id, *, synthetic=False):
     return comments
 
 
-def network_failure_message(failure, stage):
+def network_cause(failure):
     cause = failure
-    wrapped = isinstance(failure, error.URLError)
     for _ in range(3):
         if isinstance(cause, error.URLError) and isinstance(cause.reason, BaseException) and cause.reason is not cause:
             cause = cause.reason
         else:
             break
+    return cause
+
+
+def is_transient_network_failure(failure):
+    if isinstance(failure, error.HTTPError):
+        return False
+    cause = network_cause(failure)
+    if isinstance(cause, ssl.SSLError):
+        return False
+    if isinstance(cause, socket.gaierror):
+        return cause.errno == socket.EAI_AGAIN
+    return isinstance(cause, (TimeoutError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError, RemoteDisconnected, IncompleteRead)) or (
+        isinstance(cause, OSError) and cause.errno in {errno.ECONNRESET, errno.ECONNABORTED, errno.ETIMEDOUT, errno.EPIPE}
+    )
+
+
+def network_failure_message(failure, stage):
+    cause = network_cause(failure)
+    wrapped = isinstance(failure, error.URLError)
     known_types = (
         (socket.gaierror, "gaierror"),
         (ssl.SSLCertVerificationError, "SSLCertVerificationError"), (ssl.SSLError, "SSLError"),
@@ -151,8 +172,8 @@ def network_failure_message(failure, stage):
     elif isinstance(cause, ssl.SSLError):
         category, detail = "ssl", "SSL/TLS operation failed."
     elif isinstance(cause, TimeoutError) or (isinstance(cause, OSError) and cause.errno == errno.ETIMEDOUT):
-        category = "read_timeout" if stage in {"read", "read_error_body"} else "open_timeout"
-        detail = "Read timeout while receiving the response body." if category == "read_timeout" else "Timeout opening the response; connect, proxy/TLS or response-header wait cannot be distinguished by urllib here."
+        category = "read_timeout" if stage in {"read", "read_error_body"} else "open_timeout" if stage == "open" else "timeout"
+        detail = "Read timeout while receiving the response body." if category == "read_timeout" else "Timeout opening the response; connect, proxy/TLS or response-header wait cannot be distinguished by urllib here." if category == "open_timeout" else "Timeout outside the connection/body-read stage."
     elif isinstance(cause, (RemoteDisconnected, ConnectionResetError)):
         category, detail = "connection_reset", "Connection was reset or closed before the operation completed."
     elif isinstance(cause, ConnectionRefusedError):
@@ -165,7 +186,7 @@ def network_failure_message(failure, stage):
         category, detail = "network_other", "Network/OS error without a more specific safe classification."
     else:
         category, detail = "unexpected", "Unexpected request-processing exception; raw details omitted."
-    return f"[category={category}; stage={stage}; exception={exception_type}] {detail} No automatic retry."
+    return f"[category={category}; stage={stage}; exception={exception_type}] {detail}"
 
 
 def http_failure_message(failure):
@@ -225,6 +246,39 @@ def http_failure_message(failure):
     return prefix + message + (" " + body_diagnostic if body_diagnostic else "") + " No automatic retry."
 
 
+def request_json(api_request, *, operation):
+    if operation not in {"comments", "search"} or api_request.get_method() != "GET":
+        raise YouTubeReadError("Unsupported read-only request; nothing sent.")
+    for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
+        label = f"[youtube:{operation}; attempt={attempt}/{MAX_REQUEST_ATTEMPTS}]"
+        print(label + " Requesting one page.", file=sys.stderr)
+        stage = "open"
+        try:
+            with request.build_opener(NoRedirect()).open(api_request, timeout=30) as response:
+                stage = "read"
+                raw = response.read(MAX_RESPONSE_BYTES + 1)
+                stage = "close"
+            stage = "decode"
+            if len(raw) > MAX_RESPONSE_BYTES:
+                raise YouTubeReadError("Response exceeded the preview size limit. No retry.")
+            return json.loads(raw)
+        except error.HTTPError as failure:
+            raise YouTubeReadError(label + " " + http_failure_message(failure)) from None
+        except YouTubeReadError as failure:
+            raise YouTubeReadError(label + " " + str(failure)) from None
+        except (ValueError, UnicodeError):
+            raise YouTubeReadError(label + " [category=invalid_json; stage=decode] YouTube returned invalid JSON. No automatic retry.") from None
+        except Exception as failure:
+            diagnostic = network_failure_message(failure, stage)
+            transient = stage in {"open", "read"} and is_transient_network_failure(failure)
+            if transient and attempt < MAX_REQUEST_ATTEMPTS:
+                print(label + " " + diagnostic + f" Retrying once after {RETRY_DELAY_SECONDS}s.", file=sys.stderr)
+            else:
+                ending = "Retry limit reached; no further requests." if transient else "Not retryable; no automatic retry."
+                raise YouTubeReadError(label + " " + diagnostic + " " + ending) from None
+        time.sleep(RETRY_DELAY_SECONDS)
+
+
 def fetch_comments(video_id, api_key):
     if not VIDEO_ID_PATTERN.fullmatch(video_id):
         raise YouTubeReadError("Invalid video ID; no request was sent.")
@@ -235,27 +289,7 @@ def fetch_comments(video_id, api_key):
         "key": api_key,
     }
     api_request = request.Request(ENDPOINT + "?" + parse.urlencode(parameters), headers={"Accept": "application/json"}, method="GET")
-    stage = "open"
-    try:
-        with request.build_opener(NoRedirect()).open(api_request, timeout=30) as response:
-            stage = "read"
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
-            stage = "close"
-        stage = "decode"
-        if len(raw) > MAX_RESPONSE_BYTES:
-            raise YouTubeReadError("Response exceeded the preview size limit. No retry.")
-        payload = json.loads(raw)
-    except error.HTTPError as failure:
-        raise YouTubeReadError(http_failure_message(failure)) from None
-    except YouTubeReadError:
-        raise
-    except (error.URLError, TimeoutError, OSError, HTTPException) as failure:
-        raise YouTubeReadError(network_failure_message(failure, stage)) from None
-    except (ValueError, UnicodeError):
-        raise YouTubeReadError("[category=invalid_json; stage=decode] YouTube returned invalid JSON. No automatic retry.") from None
-    except Exception as failure:
-        raise YouTubeReadError(network_failure_message(failure, stage)) from None
-    return normalize_comments(payload, video_id)
+    return normalize_comments(request_json(api_request, operation="comments"), video_id)
 
 
 def preview_text(value):
@@ -265,7 +299,7 @@ def preview_text(value):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("video", nargs="?", help="YouTube video URL or Video ID")
-    parser.add_argument("--live", action="store_true", help="Opt in to one real API request using Agent/.env")
+    parser.add_argument("--live", action="store_true", help="Opt in to one real API page, at most two attempts, using Agent/.env")
     arguments = parser.parse_args(argv)
     if arguments.live and not arguments.video:
         parser.error("--live requires your chosen video URL or Video ID")

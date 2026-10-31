@@ -4,13 +4,11 @@ import argparse
 import json
 import sys
 import unicodedata
-from http.client import HTTPException
 from pathlib import Path
-from urllib import error, parse, request
+from urllib import parse, request
 
 from youtube_comments import (
-    MAX_RESPONSE_BYTES, VIDEO_ID_PATTERN, NoRedirect, YouTubeReadError,
-    http_failure_message, load_youtube_key, preview_text,
+    MAX_RESPONSE_BYTES, VIDEO_ID_PATTERN, YouTubeReadError, load_youtube_key, preview_text, request_json,
 )
 
 
@@ -67,28 +65,13 @@ def search_videos(query, api_key):
         "key": api_key,
     }
     api_request = request.Request(SEARCH_ENDPOINT + "?" + parse.urlencode(parameters), headers={"Accept": "application/json"}, method="GET")
-    try:
-        with request.build_opener(NoRedirect()).open(api_request, timeout=30) as response:
-            raw = response.read(MAX_RESPONSE_BYTES + 1)
-        if len(raw) > MAX_RESPONSE_BYTES:
-            raise YouTubeReadError("Search response exceeded the size limit. No automatic retry.")
-        payload = json.loads(raw)
-    except error.HTTPError as failure:
-        if failure.code == 400:
-            failure.close()
-            raise YouTubeReadError("Search request rejected (400). Check the keyword, local API key and project configuration.") from None
-        raise YouTubeReadError("Search failed: " + http_failure_message(failure)) from None
-    except (error.URLError, TimeoutError, OSError, HTTPException):
-        raise YouTubeReadError("Search connection failed or timed out. No automatic retry; check access to Google APIs.") from None
-    except (ValueError, UnicodeError):
-        raise YouTubeReadError("YouTube search returned invalid JSON. No automatic retry.") from None
-    return normalize_videos(payload)
+    return normalize_videos(request_json(api_request, operation="search"))
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("query", nargs="?", help="Product keyword, enclosed in quotes")
-    parser.add_argument("--live", action="store_true", help="Opt in to one official search request using Agent/.env")
+    parser.add_argument("--live", action="store_true", help="Opt in to one official search page, at most two attempts, using Agent/.env")
     arguments = parser.parse_args(argv)
     if arguments.live and arguments.query is None:
         parser.error("--live requires your chosen product keyword")

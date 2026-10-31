@@ -28,6 +28,12 @@ class YouTubeCommentsTests(unittest.TestCase):
         network = patch.object(youtube.request, "build_opener")
         self.opener_factory = network.start()
         self.addCleanup(network.stop)
+        sleeper = patch.object(youtube.time, "sleep")
+        self.sleep = sleeper.start()
+        self.addCleanup(sleeper.stop)
+        stderr = patch("sys.stderr", new=io.StringIO())
+        stderr.start()
+        self.addCleanup(stderr.stop)
 
     def response(self, payload):
         self.opener_factory.return_value.open.return_value.__enter__.return_value = io.BytesIO(json.dumps(payload).encode())
@@ -147,7 +153,8 @@ class YouTubeCommentsTests(unittest.TestCase):
             with self.assertRaises(youtube.YouTubeReadError) as caught:
                 youtube.fetch_comments(youtube.MOCK_VIDEO_ID, self.key)
             self.assertNotIn(self.key, str(caught.exception))
-            self.opener_factory.return_value.open.assert_called_once()
+            expected_attempts = 2 if isinstance(failure, TimeoutError) else 1
+            self.assertEqual(self.opener_factory.return_value.open.call_count, expected_attempts)
 
     def test_empty_comments_success(self):
         self.response({"items": []})
@@ -207,7 +214,7 @@ class YouTubeCommentsTests(unittest.TestCase):
             self.assertIn(type_name, message)
             self.assertNotIn(self.key, message)
             self.assertNotIn("https://", message)
-            self.opener_factory.return_value.open.assert_called_once()
+            self.assertEqual(self.opener_factory.return_value.open.call_count, 2 if youtube.is_transient_network_failure(failure) else 1)
 
     def test_read_timeout_differs_from_open_timeout(self):
         response = Mock()
@@ -218,7 +225,7 @@ class YouTubeCommentsTests(unittest.TestCase):
         self.assertIn("category=read_timeout", str(raised.exception))
         self.assertIn("stage=read", str(raised.exception))
         self.assertNotIn(self.key, str(raised.exception))
-        self.opener_factory.return_value.open.assert_called_once()
+        self.assertEqual(self.opener_factory.return_value.open.call_count, 2)
 
     def test_incomplete_read_hides_partial_response_and_key(self):
         response = Mock()

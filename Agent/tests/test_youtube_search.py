@@ -26,6 +26,12 @@ class YouTubeSearchTests(unittest.TestCase):
         network = patch.object(search.request, "build_opener")
         self.opener = network.start()
         self.addCleanup(network.stop)
+        sleeper = patch.object(comments.time, "sleep")
+        self.sleep = sleeper.start()
+        self.addCleanup(sleeper.stop)
+        stderr = patch("sys.stderr", new=io.StringIO())
+        stderr.start()
+        self.addCleanup(stderr.stop)
 
     def respond(self, payload):
         self.opener.return_value.open.return_value.__enter__.side_effect = lambda: io.BytesIO(json.dumps(payload).encode())
@@ -165,7 +171,7 @@ class YouTubeSearchTests(unittest.TestCase):
             with self.assertRaises(search.YouTubeReadError) as raised:
                 search.search_videos("Cleaner", self.key)
             self.assertNotIn(self.key, str(raised.exception))
-            self.opener.return_value.open.assert_called_once()
+            self.assertEqual(self.opener.return_value.open.call_count, 2 if isinstance(failure, TimeoutError) else 1)
 
     def test_invalid_json_and_oversized_response(self):
         for raw in (b"not-json", b"x" * (search.MAX_RESPONSE_BYTES + 1)):
