@@ -1,0 +1,11 @@
+{
+  "kind": "youtube#searchListResponse",
+  "nextPageToken": "MOCK_PAGE_MUST_NOT_BE_REQUESTED",
+  "items": [
+    {"id": {"kind": "youtube#video", "videoId": "TESTvideo01"}, "snippet": {"title": "SYNTHETIC TEST: Robotic pool cleaner overview", "channelTitle": "Synthetic Hardware Channel A", "publishedAt": "2026-01-01T00:00:00Z"}},
+    {"id": {"kind": "youtube#video", "videoId": "TESTvideo02"}, "snippet": {"title": "SYNTHETIC TEST: Pool robot maintenance demonstration", "channelTitle": "Synthetic Hardware Channel B", "publishedAt": "2026-01-02T00:00:00Z"}},
+    {"id": {"kind": "youtube#video", "videoId": "TESTvideo03"}, "snippet": {"title": "SYNTHETIC TEST: Setting up a pool cleaner", "channelTitle": "Synthetic Hardware Channel C", "publishedAt": "2026-01-03T00:00:00Z"}},
+    {"id": {"kind": "youtube#video", "videoId": "TESTvideo04"}, "snippet": {"title": "SYNTHETIC TEST: Pool steps cleaning discussion", "channelTitle": "Synthetic Hardware Channel D", "publishedAt": "2026-01-04T00:00:00Z"}},
+    {"id": {"kind": "youtube#video", "videoId": "TESTvideo05"}, "snippet": {"title": "SYNTHETIC TEST: Filter removal walkthrough", "channelTitle": "Synthetic Hardware Channel E", "publishedAt": "2026-01-05T00:00:00Z"}}
+  ]
+}
