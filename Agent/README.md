@@ -5,6 +5,50 @@ An AI-powered tool for consumer insights and competitive intelligence.
 ## Project Status
 MVP Development
 
+## Milestone 3.0：真实数据发现 Web App（分析待许可）
+
+产品方向：产品名称／品类 → YouTube 视频搜索 → 选片读取公开评论 → **获准后**筛选反馈、Qwen、洞察和报告。
+普通用户不需要 CSV。正式界面已移除 Demo Mode；原有合成数据、Mock CLI、自动化测试和分析模块仍保留供开发验证。
+
+在 VS Code 打开 AI-Marketing 仓库，选择「终端 → 新建终端」。首次安装：
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r Agent/requirements.txt
+python -B -m unittest discover -s Agent/tests -v
+```
+
+从仓库根目录启动（之后重新打开终端时先执行 `source .venv/bin/activate`）：
+
+```sh
+python -m streamlit run Agent/web_app.py --server.address 127.0.0.1 --server.port 8501 --server.headless true --browser.gatherUsageStats false
+```
+
+浏览器打开 <http://127.0.0.1:8501>。这个服务仅绑定本机地址，不部署到服务器。
+停止服务：回到运行它的终端，按 **Control+C**；退出虚拟环境用 `deactivate`。
+如果 8501 端口已被占用，将命令中的端口改为 8502，并访问对应地址。
+
+- 页面直接展示 **LIVE READ-ONLY / YouTube 来源**，打开或刷新页面不联网。输入产品关键词，阅读并同意本地数据使用说明后，主动点击「搜索 YouTube 视频」。本地说明用于解释数据处理，不是分析授权开关；正式公开产品仍需补齐隐私政策、删除联系渠道及审查材料。
+- 最多显示 5 个视频；手动选中一个，再点击「读取所选视频评论」，最多读取 10 条、仅展示前三条截断预览。只有两个请求按钮会通过现有模块在本机加载 YouTube Key；网络暂时故障沿用最多两次尝试。搜索和读取分别消耗配额，选片、清除、改变关键词不产生新请求。
+- **分析入口禁用**：未取得覆盖具体用途的适用许可前，不将真实评论交给资格筛选、Qwen、派生统计或报告。`real_pipeline.run_real_analysis` 即使被直接调用也始终拒绝；没有环境变量或网页设置可以启用。
+- 页面仅保留三条短预览及来源元数据于会话内存，不写文件、不使用持久缓存、没有评论/报告下载。修改关键词、选片、撤回本地说明同意或点击「清除本次结果」会清除相应结果；停止本地进程可清除服务器会话内存。不要把关闭浏览器当成即时删除承诺。
+- 预览保留 review_id、comment_id、video_id、source_platform、source_url、published_at、collected_at（UTC）；brand 为 unknown，品牌归属 unverified，证据质量 not_assessed，反馈类型为空。不根据标题/关键词推断购买、使用经历、品牌或情绪；短预览不能作为后续分析原文。
+- 网页错误为安全的说明和解决方向；不显示异常原文、密钥、完整请求 URL 或请求头。网络重置可稍后手动重新点击；评论关闭请换视频；配额问题请等待重置；密钥/权限问题请在本机检查配置，不粘贴密钥到网页。
+
+实现与材料：`web_app.py` 为薄界面层，`real_pipeline.py` 提供来源记录适配和关闭的分析接口，
+`orchestrator.py` 仅新增成功读取后的采集时间。`requirements.txt` 不新增依赖。
+`tests/test_web_app.py` 使用合成响应验证界面和边界；`tests/test_real_pipeline.py` 验证来源字段和后端拒绝执行。
+安装依赖后上述测试命令会运行界面测试；未安装 Streamlit 时仅跳过这组测试，原有标准库测试仍可运行。
+测试将 API 和密钥加载函数替换为 Mock，不读取本机 `.env`。不要将 `.venv`、`.env` 或运行结果提交到 Git。
+
+许可申请技术/政策说明、英文用途草稿及手动操作清单：
+[YouTube Analytics & Reporting 申请材料](docs/YOUTUBE_ANALYTICS_APPLICATION.md)。
+模块复用、数据契约与获准后分阶段实现计划：
+[Real Data → Qwen → Report 接入设计](docs/REAL_DATA_PIPELINE.md)。
+本轮未提交申请，也未取得批准；开通 API Key 或 YouTube Analytics API 不代表取得跨视频产品分析许可。
+以下 Mock/历史里程碑说明属于开发工具说明，不是正式用户界面的 Demo 功能。
+
 ## YouTube 有限网络重试（当前行为）
 
 搜索和评论读取现在共用 `youtube_comments.request_json`：每个单页读取最多 **2 次请求（首次＋1 次重试）**，
