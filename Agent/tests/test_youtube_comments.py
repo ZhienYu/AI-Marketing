@@ -2,10 +2,13 @@ import contextlib
 import copy
 import io
 import json
+import socket
+import ssl
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from http.client import IncompleteRead, RemoteDisconnected
 from unittest.mock import Mock, patch
 from urllib import error, parse
 
@@ -177,6 +180,114 @@ class YouTubeCommentsTests(unittest.TestCase):
         self.assertEqual(len(preview), 240)
         self.assertNotIn("\x1b", preview)
         self.assertNotIn("\u202e", preview)
+
+    def test_open_failures_have_safe_type_category_and_stage(self):
+        failures = (
+            (error.URLError(socket.gaierror(-2, self.key)), "dns", "URLError(gaierror)"),
+            (socket.gaierror(-2, self.key), "dns", "gaierror"),
+            (error.URLError(TimeoutError(self.key)), "open_timeout", "URLError(TimeoutError)"),
+            (TimeoutError(self.key), "open_timeout", "TimeoutError"),
+            (error.URLError(ssl.SSLCertVerificationError(1, self.key)), "ssl_certificate", "SSLCertVerificationError"),
+            (ssl.SSLError(1, self.key), "ssl", "SSLError"),
+            (ConnectionResetError(self.key), "connection_reset", "ConnectionResetError"),
+            (ConnectionRefusedError(self.key), "connection_refused", "ConnectionRefusedError"),
+            (RemoteDisconnected(self.key), "connection_reset", "RemoteDisconnected"),
+            (OSError(self.key), "network_other", "OSError"),
+            (error.URLError("https://example.com/?key=" + self.key), "network_other", "URLError"),
+            (RuntimeError(self.key), "unexpected", "RuntimeError"),
+        )
+        for failure, category, type_name in failures:
+            self.opener_factory.return_value.open.reset_mock()
+            self.opener_factory.return_value.open.side_effect = failure
+            with self.subTest(category=category, type_name=type_name), self.assertRaises(youtube.YouTubeReadError) as raised:
+                youtube.fetch_comments(youtube.MOCK_VIDEO_ID, self.key)
+            message = str(raised.exception)
+            self.assertIn("category=" + category, message)
+            self.assertIn("stage=open", message)
+            self.assertIn(type_name, message)
+            self.assertNotIn(self.key, message)
+            self.assertNotIn("https://", message)
+            self.opener_factory.return_value.open.assert_called_once()
+
+    def test_read_timeout_differs_from_open_timeout(self):
+        response = Mock()
+        response.read.side_effect = TimeoutError(self.key)
+        self.opener_factory.return_value.open.return_value.__enter__.return_value = response
+        with self.assertRaises(youtube.YouTubeReadError) as raised:
+            youtube.fetch_comments(youtube.MOCK_VIDEO_ID, self.key)
+        self.assertIn("category=read_timeout", str(raised.exception))
+        self.assertIn("stage=read", str(raised.exception))
+        self.assertNotIn(self.key, str(raised.exception))
+        self.opener_factory.return_value.open.assert_called_once()
+
+    def test_incomplete_read_hides_partial_response_and_key(self):
+        response = Mock()
+        response.read.side_effect = IncompleteRead(self.key.encode(), 200)
+        self.opener_factory.return_value.open.return_value.__enter__.return_value = response
+        with self.assertRaises(youtube.YouTubeReadError) as raised:
+            youtube.fetch_comments(youtube.MOCK_VIDEO_ID, self.key)
+        self.assertIn("category=incomplete_read", str(raised.exception))
+        self.assertIn("stage=read", str(raised.exception))
+        self.assertNotIn(self.key, str(raised.exception))
+
+    def test_explicit_http_status_reason_and_api_status(self):
+        for status, reason in ((403, "commentsDisabled"), (404, "videoNotFound"), (403, "forbidden")):
+            body = {"error": {"status": "PERMISSION_DENIED", "message": self.key, "errors": [{"reason": reason}]}}
+            self.opener_factory.return_value.open.side_effect = error.HTTPError("https://example.com?key=" + self.key, status, self.key, {"Authorization": self.key}, io.BytesIO(json.dumps(body).encode()))
+            stderr = io.StringIO()
+            with patch.object(youtube, "load_youtube_key", return_value=self.key), contextlib.redirect_stderr(stderr):
+                self.assertEqual(youtube.main(["--live", youtube.MOCK_VIDEO_ID]), 2)
+            message = stderr.getvalue()
+            self.assertIn("category=youtube_api", message)
+            self.assertIn(f"http={status}", message)
+            self.assertIn("reason=" + reason, message)
+            self.assertIn("status=PERMISSION_DENIED", message)
+            self.assertNotIn(self.key, message)
+            self.assertNotIn("https://", message)
+            self.assertNotIn("Authorization", message)
+
+    def test_modern_google_error_details_are_supported(self):
+        body = {"error": {"status": "PERMISSION_DENIED", "message": self.key, "details": [{"reason": "API_KEY_SERVICE_BLOCKED", "metadata": {"key": self.key}}]}}
+        failure = error.HTTPError("https://example.com?key=" + self.key, 403, self.key, {}, io.BytesIO(json.dumps(body).encode()))
+        message = youtube.http_failure_message(failure)
+        self.assertIn("reason=API_KEY_SERVICE_BLOCKED", message)
+        self.assertNotIn(self.key, message)
+
+    def test_http_without_json_retains_status(self):
+        for status in (403, 404, 503):
+            failure = error.HTTPError("https://example.com?key=" + self.key, status, self.key, {}, io.BytesIO(("<html>" + self.key).encode()))
+            message = youtube.http_failure_message(failure)
+            self.assertIn("category=http", message)
+            self.assertIn(f"http={status}", message)
+            self.assertNotIn(self.key, message)
+
+    def test_http_error_body_timeout_preserves_http_and_read_diagnosis(self):
+        body = Mock()
+        body.read.side_effect = TimeoutError(self.key)
+        failure = error.HTTPError("https://example.com?key=" + self.key, 403, self.key, {}, body)
+        message = youtube.http_failure_message(failure)
+        self.assertIn("http=403", message)
+        self.assertIn("category=read_timeout", message)
+        self.assertIn("stage=read_error_body", message)
+        self.assertNotIn(self.key, message)
+
+    def test_unknown_api_fields_are_not_echoed(self):
+        body = {"error": {"status": self.key, "message": self.key, "errors": [{"reason": self.key}]}}
+        failure = error.HTTPError("https://example.com?key=" + self.key, 403, self.key, {}, io.BytesIO(json.dumps(body).encode()))
+        message = youtube.http_failure_message(failure)
+        self.assertIn("reason=unrecognized_or_unavailable", message)
+        self.assertNotIn(self.key, message)
+
+    def test_timeout_diagnostic_does_not_claim_exact_connect_phase(self):
+        message = youtube.network_failure_message(TimeoutError(self.key), "open")
+        self.assertIn("connect, proxy/TLS or response-header wait", message)
+        self.assertIn("cannot be distinguished", message)
+
+    def test_decode_stage_is_identified(self):
+        self.opener_factory.return_value.open.return_value.__enter__.return_value = io.BytesIO(b"not-json")
+        with self.assertRaises(youtube.YouTubeReadError) as raised:
+            youtube.fetch_comments(youtube.MOCK_VIDEO_ID, self.key)
+        self.assertIn("category=invalid_json; stage=decode", str(raised.exception))
 
 
 if __name__ == "__main__":
