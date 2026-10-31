@@ -1,0 +1,25 @@
+{
+  "is_synthetic": true,
+  "notice": "Newly authored synthetic pipeline examples. DemoAqua and DemoPool are fictional. Not copied from YouTube.",
+  "video_id": "TESTvideo01",
+  "comment_threads": {
+    "nextPageToken": "MOCK_PAGE_MUST_NOT_BE_REQUESTED",
+    "items": [
+      {"snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "pipeline-01", "snippet": {"textDisplay": "I used DemoAqua R1 for two weeks. Its battery is excellent.", "publishedAt": "2026-01-01T00:00:00Z"}}}},
+      {"snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "pipeline-02", "snippet": {"textDisplay": "My DemoPool X2 gets stuck near the steps.", "publishedAt": "2026-01-02T00:00:00Z"}}}},
+      {"snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "pipeline-03", "snippet": {"textDisplay": "price?", "publishedAt": "2026-01-03T00:00:00Z"}}}},
+      {"snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "pipeline-04", "snippet": {"textDisplay": "Great video. Your editing is excellent.", "publishedAt": "2026-01-04T00:00:00Z"}}}},
+      {"snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "pipeline-05", "snippet": {"textDisplay": "First! Hello everyone!", "publishedAt": "2026-01-05T00:00:00Z"}}}},
+      {"snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "pipeline-06", "snippet": {"textDisplay": "Robotic pool cleaners are expensive.", "publishedAt": "2026-01-06T00:00:00Z"}}}},
+      {"snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "pipeline-07", "snippet": {"textDisplay": "I used it for a month.", "publishedAt": "2026-01-07T00:00:00Z"}}}},
+      {"snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "pipeline-08", "snippet": {"textDisplay": "DemoAqua R1 has a removable filter.", "publishedAt": "2026-01-08T00:00:00Z"}}}},
+      {"snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "pipeline-09", "snippet": {"textDisplay": "I used DemoPool X2 for a week. Its battery is not good.", "publishedAt": "2026-01-09T00:00:00Z"}}}},
+      {"snippet": {"videoId": "TESTvideo01", "topLevelComment": {"id": "pipeline-10", "snippet": {"textDisplay": "Where can I buy DemoAqua R1?", "publishedAt": "2026-01-10T00:00:00Z"}}}}
+    ]
+  },
+  "classifications": {
+    "youtube:pipeline-01": {"review_text": "I used DemoAqua R1 for two weeks. Its battery is excellent.", "classification": {"sentiment": "Positive", "positive_aspects": ["Excellent battery"], "pain_points": [], "product_aspects": [{"aspect": "Battery Life", "sentiment": "Positive", "feedback": "Battery described as excellent after two weeks of use"}]}},
+    "youtube:pipeline-02": {"review_text": "My DemoPool X2 gets stuck near the steps.", "classification": {"sentiment": "Negative", "positive_aspects": [], "pain_points": ["Gets stuck near steps"], "product_aspects": [{"aspect": "Reliability", "sentiment": "Negative", "feedback": "Gets stuck near steps"}]}},
+    "youtube:pipeline-09": {"review_text": "I used DemoPool X2 for a week. Its battery is not good.", "classification": {"sentiment": "Negative", "positive_aspects": [], "pain_points": ["Battery described as not good"], "product_aspects": [{"aspect": "Battery Life", "sentiment": "Negative", "feedback": "Battery described as not good after one week of use"}]}}
+  }
+}
