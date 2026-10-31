@@ -5,6 +5,216 @@ An AI-powered tool for consumer insights and competitive intelligence.
 ## Project Status
 MVP Development
 
+## Milestone 2.8：Consumer Feedback Qualification（合成数据最小版）
+
+新增独立 `qualify_feedback.py`，以保守英文规则实际识别输入，不调用 AI，也不是按 review_id 查预设标签。
+命令只读取新编写的合成 fixture；底层函数也要求每条 `is_synthetic=true`，拒绝真实或未标记的输入。
+不读取 `.env`、不访问 YouTube、不保存评论、不修改现有 Qwen／洞察／报告流程。
+DemoAqua、DemoPool 和型号均为虚构，例句自行编写，不来自真实 YouTube 评论。
+
+在 Mac VS Code 的仓库根目录终端运行：
+
+```sh
+python3 -B Agent/qualify_feedback.py --summary-only
+python3 -B Agent/qualify_feedback.py
+python3 -B -m unittest discover -s Agent/tests -v
+```
+
+第一条只看数据质量摘要，第二条还显示每条反馈的判定、理由、原文证据和复核项，输出仅在终端。
+20 条合成例子预期：可用产品反馈候选 8 条、其中使用体验候选 3 条、购买咨询 5 条、
+视频内容反馈 2 条、无关/不明确互动 2 条；全部提示 `Insufficient Data`。
+反馈类型可以重叠，不能把这些数字相加作为总数。
+
+### 输出语义
+
+| 字段 | 含义 |
+|---|---|
+| `primary_type` / `feedback_types` | 五类中的主类型／可重叠类型列表 |
+| `product_sentiment` | 明确针对产品的 Positive、Negative、Mixed，或 Not Expressed / Unclear |
+| `content_sentiment` | 针对视频、讲解或剪辑的情绪，独立保存，不混入产品情绪 |
+| `usage_evidence` | 自述使用、无使用证据或转述歧义，保留支持句；`verified_purchase` 始终为 false |
+| `feedback_scope` | 明确型号 `product`、仅品牌 `brand`、仅品类 `category` 或 `unknown` |
+| `brand` / `product_model` | 仅在正文中匹配配置目录的明确名称，不使用视频标题或频道名猜测 |
+| `qualification_status` | qualified / ambiguous / insufficient evidence |
+| `evidence_strength` | strong / moderate / weak / insufficient evidence；是文字直接性规则，不是真实性概率 |
+| `eligible_for_product_insights` | 有明确目标、实质产品陈述且无已识别歧义的候选；可能是意见或事实，不必是亲身体验 |
+| `eligible_as_usage_review` | 上述候选中另外具有明确的第一人称使用／运行证据 |
+| `reasons` / `ambiguities` / `evidence` | 判定理由、人工复核项和输入原文片段 |
+
+五类为：Actual Usage Experience、Purchase Inquiry、Product Discussion、Content Feedback、Irrelevant/Unclear。
+例如：
+
+- `price?` 或 `Is DemoAqua R1 expensive?`：购买咨询、Not Expressed，不自动算价格差评。
+- `DemoAqua R1 is overpriced.`：产品意见，可为负面，但没有使用或购买证据。
+- `I bought DemoAqua R1 yesterday.`：只有购买陈述，不能当作使用体验或实质产品评价。
+- `My DemoPool X2 gets stuck...`：有自述使用结果，仍不等于平台验证购买。
+- `Great video. My DemoPool X2 broke...`：视频情绪正面、产品情绪负面，分别记录。
+- 仅泛指品类的反馈保留 `brand=unknown`；多品牌、转述、引用、部分否定或不确定表达优先复核。
+- 仅 `I used it...` 而无法识别目标时，保留使用陈述，但不自动送入有效商品评价池。
+
+### 数据质量摘要与边界
+
+摘要包含各类型数量、合格候选数、使用体验候选数、ambiguous / insufficient evidence 数量、
+已知品牌候选样本量和未知品牌候选数。同一 review_id 只允许一次，重复 ID 直接报错。
+20 条样本阈值仅沿用开发阶段提醒，达到阈值也不代表有市场代表性。
+四条文字带使用陈述的例子中，一条目标不明，所以只有三条进入使用体验候选池。
+
+这是有限英文模式的最小原型，不是通用语言理解或可靠的生产过滤器；
+复杂反讽、长句、跨句指代、多语言及真实品牌目录都可能识别不足或出错，需后续人工标注评估。
+规则能判定句子表达了什么，不能核实评论者实际拥有产品，也不能证明产品事实为真。
+识别不到情绪使用 Not Expressed，不等于满意；无法识别模式时使用 Unclear/insufficient evidence。
+
+### 未来衔接（本阶段未接入）
+
+计划流程：数据源读取 → 资格筛选 → 分流与人工复核 → 产品属性分类 → 分池统计 → 报告。
+未来适配器应保留原始来源、ID 和正文，并将 qualification 作为附加元数据，不覆盖原文和现有缓存指纹。
+
+1. `eligible_as_usage_review` 可进入亲身体验候选池；其他合格产品意见与事实独立成池，报告分别注明。
+2. Purchase Inquiry 用于购买信息需求，不直接作为痛点/负面情绪；Content Feedback 和无关互动不进入产品评价统计。
+3. 有询问又有明确独立产品陈述时可以保留双标签，只分析有证据支持的陈述。
+4. ambiguous / insufficient evidence 先复核或排除；未知品牌可进入品类研究，不进入品牌横向比较。
+5. Qwen 应继续只提取有文字支持的属性，不把 Not Expressed 咨询补成 Negative，也不把自述使用标为 verified purchase。
+
+新增 `tests/test_qualify_feedback.py` 与 `tests/fixtures/feedback_qualification_synthetic.json`，
+覆盖五类、咨询无负面、使用与购买区别、目标归属、复合反馈、否定、多品牌、样本摘要和真实输入拒绝。
+没有新增真实数据入口；未来启用真实评论前须单独完成用途授权、人工评估与适配开发。
+
+## YouTube 评论连接诊断
+
+原来的 `Connection failed or timed out` 合并了 `URLError`、`TimeoutError`、`OSError` 和
+`HTTPException`，不能据此判断视频是否关闭评论。现在错误包含安全的分类、阶段与异常类型，
+不输出原始异常消息、Key、完整请求地址、请求头或原始错误正文。
+
+| category | 含义 |
+|---|---|
+| `dns` | DNS 解析失败，如 `URLError(gaierror)` |
+| `open_timeout` | 打开响应超时，可能发生在连接、代理、TLS 或等待响应头期间 |
+| `read_timeout` | 已进入正文读取阶段后超时；也可能发生在读取 HTTP 错误正文时 |
+| `ssl_certificate` / `ssl` | TLS 证书校验失败／其他 SSL 错误，不禁用证书校验 |
+| `connection_reset` / `connection_refused` | 连接被关闭、重置或拒绝 |
+| `incomplete_read` / `http_protocol` | 正文未读完整／HTTP 传输协议错误 |
+| `http` / `youtube_api` | 已收到 HTTP 错误响应；显示 403/404 等状态及已识别的 API 原因 |
+| `invalid_json` / `network_other` / `unexpected` | 无效 JSON、其他网络错误或其他请求处理异常 |
+
+阶段为 `open`（打开响应）、`read`（读取正文）、`close`（关闭响应）、`decode`（JSON 解码），
+或 `http_response`（已收到 HTTP 错误）与 `read_error_body`（读取错误正文）。
+`urllib.open()` 把连接和等待响应头封装在一起，所以 `open_timeout` 不能进一步证明是 TCP 连接超时；
+程序明确保留这一不确定性，不把它误报为关闭评论或某个视频不可访问。
+
+诊断示例（非真实测试结果）：
+
+```text
+[category=dns; stage=open; exception=URLError(gaierror)] ...
+[category=read_timeout; stage=read; exception=TimeoutError] ...
+[category=youtube_api; stage=http_response; http=403; reason=commentsDisabled; status=unavailable] ...
+```
+
+`commentsDisabled` 表示评论关闭；`videoNotFound` 表示视频不存在或该请求不可访问；
+`quotaExceeded` 提示配额问题，`API_KEY_SERVICE_BLOCKED` 提示 Key 服务限制。
+若 HTTP 错误正文也读取超时，仍保留已收到的 HTTP 状态，并追加错误正文的读取阶段诊断。
+仅输出已识别的固定 API 原因／状态；未知字段显示 `unrecognized_or_unavailable`，不回显可能夹带敏感信息的原文。
+
+先运行全部离线测试：
+
+```sh
+python3 -B -m unittest discover -s Agent/tests -v
+```
+
+之后在 Mac 终端自行逐条测试，不使用循环或重试脚本：
+
+```sh
+python3 -B Agent/youtube_comments.py --live "ecc6FsplkQo"
+python3 -B Agent/youtube_comments.py --live "HyIXFKNTyf8"
+python3 -B Agent/youtube_comments.py --live "aMdQpJ9ur5E"
+python3 -B Agent/youtube_comments.py --live "KCOkaweKnu0"
+```
+
+第一条可作已知曾成功的对照，但不保证本次也成功。每条命令最多一次请求、十条顶层评论，
+最多预览三条，不保存评论、不调用 Qwen、不自动重试。
+可反馈 `category`、`stage`、`exception`、`http` 和 `reason` 帮助定位，无需提供密钥或评论正文。
+
+## Milestone 2.7：按产品关键词发现 YouTube 视频
+
+新增独立 `youtube_search.py`，默认 Mock。复用现有 YouTube Key 加载、错误脱敏、
+重定向保护和终端文本清理，不修改 `youtube_comments.py` 或现有分析模块。
+开发和测试只使用合成 fixtures 与假凭证，不读取实际 `.env`，不发送真实请求。
+
+在 Mac VS Code 中打开 `AI-Marketing` 文件夹，选择「终端 → 新建终端」，先运行：
+
+```sh
+python3 -B -m unittest discover -s Agent/tests -v
+python3 -B Agent/youtube_search.py "Robotic Pool Cleaner"
+```
+
+Mock 显示 `MOCK — SYNTHETIC DATA; no API request`，最多列出五个合成视频。
+Mock 是固定示例，不是真的根据任意输入找到了对应产品；不要拿合成 ID 发起真实评论请求。
+关键字须为 1–200 字符，含空格时放在双引号内。
+
+### 你自己决定是否运行首次真实搜索
+
+现有 `.env` 中的 `YOUTUBE_API_KEY` 无需更名。只有显式 `--live` 才由本机程序读取它。
+运行：
+
+```sh
+python3 -B Agent/youtube_search.py --live "Robotic Pool Cleaner"
+```
+
+把双引号里的内容换成你自己的产品关键词即可。成功时应看到：
+
+```text
+LIVE — official YouTube search response
+Returned N video(s), maximum 5; relevance order preserved. No pagination.
+[1] 视频标题
+channel=频道名称; published_at=发布日期
+video_id=...
+https://www.youtube.com/watch?v=...
+```
+
+`N` 可以为 0–5；少于五条不会自动补页，没有结果时会明确提示，不编造视频。
+只发送一次官方 `search.list` 请求：`part=snippet`、`type=video`、`order=relevance`、`maxResults=5`。
+使用 YouTube 默认的相关性顺序，不自行评分或重排。不会查询频道详情、播放视频、下载视频或获取评论。
+结果只在终端展示，不写入文件。返回结构中的 `title`、`channel_title`、`published_at`、
+`video_id`、`video_url` 可供后续候选筛选模块使用；当前没有自动选片或品牌归属推断。
+
+### 手动选择视频，再读取评论
+
+查看搜索结果并自行选定一个视频，把它的 `video_id` 替换进下面命令：
+
+```sh
+python3 -B Agent/youtube_comments.py --live "选定视频的11位ID"
+```
+
+上面是替换模板，不能原样运行；也可以粘贴该视频完整 URL，并保留双引号。
+这是第二个独立的 API 请求，只有你运行该命令才会读取最多十条公开顶层评论、最多预览三条。
+不会自动对全部搜索结果取评论；不保存真实评论正文，不调用 Qwen，不做情绪或竞品分析。
+视频标题和频道名称不能证明评论者使用了某个品牌，评论品牌仍为 `unknown`。
+有的视频关闭评论，读取失败时请自行选择另一个，不会自动转试其他视频。
+
+### 搜索配额与错误处理
+
+截至本次核对（2026-10-31），官方搜索文档说明：默认 **100 次 search.list 调用/日**，
+每次消耗独立 **Search Queries** 配额桶的 **1 单位**。
+它不等于“返回五个视频扣五次”，也不要继续按旧资料的每次 100 通用单位估算。
+其他端点的默认共享配额为 10,000 单位/日；具体以你项目 Cloud Console 的实际配额为准。
+再运行评论程序是另一次请求，不会重做视频搜索。重复执行搜索会再次消耗配额；错误请求也可能计入用量。
+配额用完就停止，等待重置或按官方流程申请，不通过多项目规避。
+
+参考：[search.list 官方参数与配额](https://developers.google.com/youtube/data/reference/rest/v3/search/list)、
+[官方配额概览](https://developers.google.com/youtube/data/getting-started#quota)。
+
+- 缺少关键词、空白或超长关键词：先在本地报错，不读 Key、不发请求。
+- 400：核对关键词、Key 和项目配置。
+- 403：检查 API 是否启用、Key 的 API／应用限制、Search Queries 的实际配额。
+- 429、超时或网络错误：不自动重试，确认网络和配额后自行再运行。
+- 空结果：改用更具体或不同的产品词；不是程序失败，也不构成市场不存在的证据。
+- 错误不会输出 Key、带 Key 的请求地址或原始服务错误正文。不要把 Key 放进命令、截图或聊天。
+
+退出码：0=成功（包括空结果），2=输入、配置、请求或响应错误。
+新增 `tests/test_youtube_search.py` 和 `tests/fixtures/youtube_search_mock.json`；
+覆盖离线默认、单次五条、顺序、配额相关参数、手动接续评论、错误脱敏和不写文件。
+本阶段仅实现关键词发现，后续可在归一化结果上添加人工审核的候选筛选与数据源适配器；
+不将搜索排名、视频标题或频道归属当作产品质量、真实消费者身份或品牌证据。
+
 ## Milestone 2.6：YouTube 公开评论只读预览
 
 独立程序 `youtube_comments.py`，仅使用 Python 标准库，不改变 Qwen、洞察及报告模块。
