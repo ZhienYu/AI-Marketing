@@ -5,6 +5,68 @@ An AI-powered tool for consumer insights and competitive intelligence.
 ## Project Status
 MVP Development
 
+## 报告质量优化：共享 41 条合成样例
+
+在已激活虚拟环境的仓库终端运行：
+
+```sh
+python -B Agent/consumer_needs.py --purpose both --expanded
+python -B -m unittest discover -s Agent/tests -v
+```
+
+第一条命令在同一 `outputs/test/pipeline/quality-*` 独立目录生成两份报告，使用同一批数据、分类和证据；终端打印两个路径。
+VS Code 打开 Markdown 后按 Command+Shift+V 预览。不会覆盖旧报告，也不会联网、读取密钥或调用付费模型。
+
+- 产品改进报告：摘要与研究建议前置，每个属性只呈现一次“场景→问题→明确需求/潜在需求→改进→验证”链，保留反证和单条反馈的证据不足提醒。
+- 竞品报告：仅显示有样本品牌，按共同功能、共同场景展示自述认知；相同方向不包装为品牌差异。无可比场景时保留研究问题，不强行输出优势或排名。
+- 详细原文、合成编号、明确需求引句、方法和校验信息集中在 Evidence Appendix，正文用 E 编号链接，不重复附加完整通用报告。
+- Navigation & Obstacle Handling 是独立研究扩展属性，与硬件故障 Reliability 分开；旧分类 schema/提示词/检查点不变，扩展标签单独保存和校验。
+- 新样例使用 `synthetic:needs-*`，没有真实 YouTube ID/链接；推断来源明确为人工 Mock，不冒充真正模型输出。真实评论分析仍禁用。
+
+设计、数据覆盖与局限见 [报告质量说明](docs/REPORT_QUALITY.md)。
+
+## Consumer Needs Discovery（合成离线开发）
+
+研究目的新增 Product Improvement Research / Competitor Research；网页可选择目的，但真实分析保持禁用。
+复用现有 Mock 全流程、资格筛选、属性洞察和 Report Generator，新增需求证据 sidecar 与两种报告前置模板。
+字段覆盖场景、具体痛点、未满足需求、改进建议、原文引句/来源、原始反馈或推断、不确定性和验证步骤。
+
+```sh
+python -B Agent/consumer_needs.py --purpose improvement
+python -B Agent/consumer_needs.py --purpose competitor
+```
+
+无需密钥，不调用 API。命令打印独立 `outputs/test/pipeline/mock-*/` 内的报告路径；VS Code 用 Command+Shift+V 预览。
+适配方案、验收标准、Qwen 可选结构、测试及跨视频聚合政策核对详见
+[Consumer Needs Research](docs/CONSUMER_NEEDS_RESEARCH.md)。
+注意：当前跨频道汇总展示的适用许可仍需 YouTube 确认；API 成功或只读不表示已获准公开部署。
+
+## Multi-Video Research（2026-11-04）
+
+启动 Web App 的命令不变。输入关键词，选择最近 3 / 6 / 12 个月的视频发布时间范围，
+阅读并同意本地数据说明，点击 **自动获取多视频评论**。无需逐个选片。
+旧单视频手动预览工具仍保留在下方，作为可选操作。
+
+- 官方相关性搜索一页，最多五个视频；每个视频按时间排序读取一页，最多十条公开顶层评论，总计最多五十条。不抓回复，不自动翻页，不自动补搜。
+- 使用 UTC 日历月回推（月底截到目标月最后一天），通过官方 `publishedAfter` 筛选**视频**，不是评论。当前不按评论日期过滤；保留 API 的 `published_at`，不会将老评论错称为近几个月的新评论。每视频只有最近一页，无法代表完整评论历史。
+- 视频按 video_id、评论按 comment_id 去重（不是按正文去重）；同内容但不同 ID 仍保留。显示搜索返回数、有评论的视频数及去重后实际评论数，这些只是获取数量，不是市场指标。
+- 每个视频可展开查看标题、ID、链接、发布时间、完整评论和评论来源。评论关闭、空页和失败单独显示；网络失败后继续其他视频。遇到全局凭据/权限/配额错误停止剩余请求，保留已成功结果。
+- 最多六次逻辑读取（搜索一次＋评论五次），每次沿用最多两次 HTTP 尝试，最坏十二次；超时沿用现有 30 秒网络操作限制，首次暂时故障等待 0.5 秒重试。不承诺整个批次 30 秒完成。同步运行期间需等待本轮结束，避免重复点击。
+- 所有结果仅在当前会话内存；修改关键词、时间范围、撤回说明同意或清除结果会移除。完整评论最多五十条，不写文件、无导出、无持久缓存，不做资格识别、Qwen、派生统计或报告。品牌 unknown，证据 not_assessed。
+
+离线测试（在仓库根目录、已激活虚拟环境）：
+
+```sh
+python -B -m unittest discover -s Agent/tests -v
+```
+
+新增 `tests/test_multi_video.py`；原有严格规范化行为保留，多视频通过可选去重参数复用读取模块。
+接口为 `orchestrator.multi_video_research(query, months=6, live=True)`，不传 live=True 则拒绝。
+真实调用仅由你主动点击网页按钮触发；测试全部使用合成数据。
+API 规则参见 [search.list](https://developers.google.com/youtube/v3/docs/search/list) 和
+[commentThreads.list](https://developers.google.com/youtube/v3/docs/commentThreads/list)。
+下方较早的三条预览说明适用于旧单视频工具；多视频入口采用本节的五十条内存上限。
+
 ## Milestone 3.0：真实数据发现 Web App（分析待许可）
 
 产品方向：产品名称／品类 → YouTube 视频搜索 → 选片读取公开评论 → **获准后**筛选反馈、Qwen、洞察和报告。

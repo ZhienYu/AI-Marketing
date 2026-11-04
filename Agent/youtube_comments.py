@@ -94,7 +94,7 @@ class NoRedirect(request.HTTPRedirectHandler):
         raise YouTubeReadError("Unexpected redirect refused. No retry; the API key was not forwarded.")
 
 
-def normalize_comments(payload, video_id, *, synthetic=False):
+def normalize_comments(payload, video_id, *, synthetic=False, deduplicate=False):
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
         raise YouTubeReadError("YouTube response has invalid structure; no results were saved.")
     comments = []
@@ -107,6 +107,8 @@ def normalize_comments(payload, video_id, *, synthetic=False):
             comment_id = top_level["id"]
             text = snippet["textDisplay"]
             published_at = snippet["publishedAt"]
+            if comment_id in seen and deduplicate:
+                continue
             if thread["videoId"] != video_id or not all(
                 isinstance(value, str) and value.strip() for value in (comment_id, text, published_at)
             ) or comment_id in seen:
@@ -279,7 +281,7 @@ def request_json(api_request, *, operation):
         time.sleep(RETRY_DELAY_SECONDS)
 
 
-def fetch_comments(video_id, api_key):
+def fetch_comments(video_id, api_key, *, deduplicate=False):
     if not VIDEO_ID_PATTERN.fullmatch(video_id):
         raise YouTubeReadError("Invalid video ID; no request was sent.")
     parameters = {
@@ -289,7 +291,8 @@ def fetch_comments(video_id, api_key):
         "key": api_key,
     }
     api_request = request.Request(ENDPOINT + "?" + parse.urlencode(parameters), headers={"Accept": "application/json"}, method="GET")
-    return normalize_comments(request_json(api_request, operation="comments"), video_id)
+    payload = request_json(api_request, operation="comments")
+    return normalize_comments(payload, video_id, deduplicate=True) if deduplicate else normalize_comments(payload, video_id)
 
 
 def preview_text(value):

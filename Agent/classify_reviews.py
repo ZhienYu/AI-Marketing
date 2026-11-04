@@ -143,7 +143,12 @@ class NoRedirect(request.HTTPRedirectHandler):
         raise ClassificationError("API redirect refused; check the Beijing endpoint.")
 
 
-def classify_qwen(review, settings, model):
+def classify_qwen(review, settings, model, *, research=False):
+    prompt = SYSTEM_PROMPT
+    if research:
+        from consumer_needs import RESEARCH_PROMPT, require_synthetic
+        require_synthetic(review)
+        prompt += "\nFor this opt-in request, wrap the classification:\n" + RESEARCH_PROMPT
     api_key = settings.get("DASHSCOPE_API_KEY") or settings.get("QWEN_API_KEY")
     if not api_key or any(character.isspace() for character in api_key):
         raise ClassificationError("Set DASHSCOPE_API_KEY in Agent/.env or the process environment.", stop_batch=True)
@@ -155,13 +160,13 @@ def classify_qwen(review, settings, model):
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": prompt},
             {"role": "user", "content": json.dumps({"review_text": review["review_text"]})},
         ],
         "response_format": {"type": "json_object"},
         "enable_thinking": False,
         "temperature": 0,
-        "max_tokens": 1000,
+        "max_tokens": 3000 if research else 1000,
         "stream": False,
     }
     http_request = request.Request(
@@ -189,7 +194,12 @@ def classify_qwen(review, settings, model):
         choice = body["choices"][0]
         if choice["finish_reason"] != "stop":
             raise ClassificationError("Qwen response incomplete; output was not saved. No automatic retry.")
-        classification = check_classification(json.loads(choice["message"]["content"]))
+        decoded = json.loads(choice["message"]["content"])
+        if research:
+            from consumer_needs import check_research_output
+            classification = check_research_output(decoded, review)
+        else:
+            classification = check_classification(decoded)
         return classification, usage
     except ClassificationError as failure:
         failure.usage = usage

@@ -1,6 +1,7 @@
 """One entry point for a synthetic report pipeline or explicitly gated live previews."""
 
 import argparse
+import calendar
 import contextlib
 import csv
 import io
@@ -20,6 +21,70 @@ from validate_reviews import REQUIRED_COLUMNS, load_reviews
 
 
 AGENT_DIR = Path(__file__).resolve().parent
+
+
+def video_cutoff(months, now=None):
+    if type(months) is not int or months not in (3, 6, 12):
+        raise ValueError("Choose 3, 6 or 12 calendar months.")
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        raise ValueError("A timezone-aware clock is required.")
+    now = now.astimezone(timezone.utc)
+    index = now.year * 12 + now.month - 1 - months
+    year, month = divmod(index, 12)
+    month += 1
+    return now.replace(year=year, month=month, day=min(now.day, calendar.monthrange(year, month)[1])).isoformat().replace("+00:00", "Z")
+
+
+def multi_video_research(query, *, months=6, live=False):
+    """Bounded, sequential official API reads only; never NLP or persistence."""
+    if live is not True:
+        raise ValueError("Multi-video reads require explicit live=True.")
+    query = youtube_search.validate_query(query)
+    cutoff = video_cutoff(months)
+    key = youtube_comments.load_youtube_key()
+    videos = youtube_search.search_videos(query, key, published_after=cutoff, deduplicate=True)[:5]
+    result = {"mode": "live-read-only", "query": query, "published_after": cutoff,
+              "collected_at": datetime.now(timezone.utc).isoformat(),
+              "searched_videos": len(videos), "videos": [], "comment_count": 0,
+              "videos_with_comments": 0, "stopped_early": False}
+    seen_videos, seen_comments = set(), set()
+    stop = False
+    for video in videos:
+        if video["video_id"] in seen_videos:
+            continue
+        seen_videos.add(video["video_id"])
+        row = {"video": video, "comments": [], "status": "pending", "failure_reason": None}
+        result["videos"].append(row)
+        if stop:
+            row.update(status="not_requested", failure_reason="此前出现凭据、权限或配额错误，本视频未请求。")
+            continue
+        try:
+            comments = youtube_comments.fetch_comments(video["video_id"], key, deduplicate=True)[:10]
+            row["collected_at"] = datetime.now(timezone.utc).isoformat()
+            for comment in comments:
+                if comment["comment_id"] in seen_comments:
+                    continue
+                seen_comments.add(comment["comment_id"])
+                row["comments"].append({**comment, "brand": "unknown", "collected_at": row["collected_at"], "evidence_quality": "not_assessed"})
+            row["status"] = "success" if row["comments"] else "empty"
+            result["comment_count"] += len(row["comments"])
+            result["videos_with_comments"] += bool(row["comments"])
+        except youtube_comments.YouTubeReadError as failure:
+            message = str(failure)
+            if "commentsDisabled" in message:
+                reason = "评论已关闭"
+            elif any(value in message for value in ("quotaExceeded", "dailyLimitExceeded", "keyInvalid", "API_KEY_INVALID", "http=401", "http=403", "http=429")):
+                reason = "凭据、权限或配额错误；停止后续请求"
+                stop = True
+            elif "http=404" in message or "videoNotFound" in message:
+                reason = "视频不可用"
+            else:
+                reason = "网络或 API 请求失败（有限重试已结束）"
+            row.update(status="failed", failure_reason=reason)
+    result["stopped_early"] = stop
+    result["unique_videos"] = len(seen_videos)
+    return result
 
 
 def read_fixture(name):

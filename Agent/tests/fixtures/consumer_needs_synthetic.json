@@ -1,0 +1,8 @@
+{
+  "youtube:pipeline-02": {
+    "usage_scenarios": [{"text":"My DemoPool X2 gets stuck near the steps.","claim_type":"raw_feedback","quote":"My DemoPool X2 gets stuck near the steps.","uncertainty":"Synthetic self-report; pool geometry and conditions unknown.","validation_step":"Ask about step dimensions and reproduce the reported event."}],
+    "specific_pain_points": [{"text":"gets stuck near the steps","claim_type":"raw_feedback","quote":"gets stuck near the steps","uncertainty":"One synthetic report; frequency and cause unknown.","validation_step":"Observe operation near steps under controlled conditions."}],
+    "unmet_needs": [{"text":"Reliable navigation near steps may be an unmet need.","claim_type":"ai_inference","quote":"gets stuck near the steps","uncertainty":"Human-authored mock inference, not a stated requirement or established market need.","validation_step":"Interview users about importance and existing workarounds."}],
+    "improvement_suggestions": [{"text":"Test a prototype for step obstacle recovery before committing to an engineering solution.","claim_type":"ai_inference","quote":"gets stuck near the steps","uncertainty":"Cause, feasibility, demand and cost are unverified; this is a mock hypothesis.","validation_step":"Compare recovery rates in a controlled prototype test; do not infer sales impact."}]
+  }
+}

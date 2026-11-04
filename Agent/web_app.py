@@ -6,7 +6,7 @@ import orchestrator
 import real_pipeline
 
 
-RESULT_KEYS = ("live_discovery", "live_preview", "selected_video", "ui_error")
+RESULT_KEYS = ("live_discovery", "live_preview", "selected_video", "ui_error", "multi_result")
 
 
 def clear_results():
@@ -41,6 +41,38 @@ def friendly_error(failure):
 
 
 def render_discovery(query, *, privacy_accepted):
+    months = st.selectbox("视频发布时间范围", [3, 6, 12], index=1, format_func=lambda value: f"最近 {value} 个月", key="video_months", on_change=clear_results)
+    st.caption("自动获取最多五个视频，每个视频最近一页最多十条顶层评论；时间范围仅筛选视频，不筛选评论。结果仅在会话内存中预览。")
+    st.caption("跨频道汇总展示的适用许可仍待确认；API 可读取不等于该汇总用途已获准公开部署。")
+    if st.button("自动获取多视频评论", type="primary", key="research_multi", disabled=not privacy_accepted) and privacy_accepted:
+        clear_results()
+        try:
+            with st.spinner("正在依次读取视频评论，最多六个单页请求…"):
+                st.session_state.multi_result = orchestrator.multi_video_research(query, months=months, live=True)
+        except Exception as failure:
+            st.session_state.ui_error = friendly_error(failure)
+    batch = st.session_state.get("multi_result")
+    if batch:
+        columns = st.columns(3)
+        for column, label, value in zip(columns, ("搜索返回视频", "获取到评论的视频", "去重后实际评论"), (batch["searched_videos"], batch["videos_with_comments"], batch["comment_count"])):
+            column.metric(label, value)
+        st.caption("视频发布时间下限（UTC）：" + batch["published_after"])
+        for row in batch["videos"]:
+            with st.expander(row["video"]["title"]):
+                st.text("Video ID: " + row["video"]["video_id"] + " · " + row["video"]["published_at"])
+                st.link_button("YouTube 视频来源", row["video"]["video_url"])
+                st.text("状态：" + row["status"] + " · 评论数：" + str(len(row["comments"])))
+                if row["failure_reason"]:
+                    st.warning(row["failure_reason"])
+                if row["status"] == "empty":
+                    st.info("本页没有可展示的新评论，不代表视频从未有评论。")
+                for comment in row["comments"]:
+                    st.text(comment["review_text"])
+                    st.text("Comment ID: " + comment["comment_id"] + " · " + comment["published_at"])
+                    st.link_button("YouTube 评论来源", comment["source_url"])
+        st.caption("仅为本次实际获取数量，不是消费者情绪或品牌指标。无资格筛选、Qwen 或报告。")
+    st.divider()
+    st.caption("可选：以下保留单视频手动预览工具，无需用它完成多视频获取。")
     st.info("LIVE READ-ONLY · 数据来源：YouTube。最多搜索 5 个视频，读取所选视频最多 10 条顶层评论，预览前三条。")
     st.caption("仅点击搜索或读取按钮才调用 API；暂时网络错误最多尝试两次。刷新、选片不会自动请求。")
     if st.button("搜索 YouTube 视频", type="primary", key="search_live", disabled=not privacy_accepted) and privacy_accepted:
@@ -107,13 +139,15 @@ def main():
     query = st.text_input("产品关键词", value="", key="keyword", on_change=clear_results, placeholder="例如 Robotic Pool Cleaner")
     with st.expander("本地数据使用说明与来源条款"):
         st.write("本应用使用 YouTube API Services。仅在你点击按钮后，将关键词或所选视频 ID 发送给 Google；密钥仅供本机请求使用。")
-        st.write("视频结果和最多三条短评论预览保留于当前 Streamlit 会话内存，不写入文件或日志，不发送给阿里云百炼或其他模型。修改关键词、清除结果或停止本地服务可移除结果。")
+        st.write("多视频结果最多五十条完整评论，单视频工具仅三条短预览，均仅保留于当前 Streamlit 会话内存，不写入文件或日志，不发送给阿里云百炼或其他模型。修改关键词、时间范围、清除结果或停止本地服务可移除结果。")
         st.write("本机浏览器与 Streamlit 建立会话连接；应用不添加广告、外部播放器或额外追踪工具。可通过侧栏清除结果，数据问题请联系本地项目维护者。公开发布前仍需补齐正式隐私政策、联系渠道和审查材料。")
         st.markdown("使用本功能须遵守 [YouTube 服务条款](https://www.youtube.com/t/terms)；另见 [Google 隐私政策](https://policies.google.com/privacy)。阅读本说明不代表取得评论分析许可。")
     accepted = st.checkbox("我已阅读并同意本地数据使用说明", key="privacy_accepted", on_change=clear_results)
     render_discovery(query, privacy_accepted=accepted)
     st.divider()
     st.subheader("下一步：消费者洞察与研究报告")
+    st.selectbox("研究目的（分析待许可）", ["Product Improvement Research", "Competitor Research"], key="research_purpose")
+    st.caption("研究目的用于后续报告组织；当前不会对真实评论执行需求发现或分析。")
     st.warning(real_pipeline.analysis_status()["reason"])
     st.button("筛选反馈 → Qwen 分析 → 生成报告（待许可）", disabled=True, key="analyze_real")
 

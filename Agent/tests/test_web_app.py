@@ -73,6 +73,28 @@ class WebAppTests(unittest.TestCase):
         self.app.button(key="search_live").click().run()
         self.app.button(key="read_comments").click().run()
 
+    def test_multi_video_button_rerun_and_clear(self):
+        self.ready()
+        result = {"searched_videos": 5, "videos_with_comments": 1, "comment_count": 10, "published_after": "2026-05-04T00:00:00Z", "videos": []}
+        with patch.object(orchestrator, "multi_video_research", return_value=result) as multi:
+            self.app.button(key="research_multi").click().run()
+            self.assertFalse(self.app.exception)
+            multi.assert_called_once_with("Robotic Pool Cleaner", months=6, live=True)
+            self.assertEqual([m.value for m in self.app.metric], ["5", "1", "10"])
+            self.app.run()
+            multi.assert_called_once()
+            self.app.selectbox(key="video_months").set_value(3).run()
+            self.assertNotIn("multi_result", self.app.session_state)
+            multi.assert_called_once()
+        self.assertTrue(self.app.button(key="analyze_real").disabled)
+
+    def test_multi_failure_has_no_raw_exception_or_stale_results(self):
+        self.ready()
+        with patch.object(orchestrator, "multi_video_research", side_effect=RuntimeError("FAKE_SECRET https://example.com")):
+            self.app.button(key="research_multi").click().run()
+        self.assertNotIn("multi_result", self.app.session_state)
+        self.assertNotIn("FAKE_SECRET", self.app.error[0].value)
+
     def test_initial_page_has_real_search_without_demo_csv_or_requests(self):
         self.app.run()
         self.assertFalse(self.app.exception)

@@ -27,7 +27,7 @@ def validate_query(query):
     return query
 
 
-def normalize_videos(payload, *, synthetic=False):
+def normalize_videos(payload, *, synthetic=False, deduplicate=False):
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
         raise YouTubeReadError("YouTube search response has invalid structure. No automatic retry.")
     videos = []
@@ -42,6 +42,8 @@ def normalize_videos(payload, *, synthetic=False):
             published_at = snippet["publishedAt"]
             if identity["kind"] != "youtube#video" or not isinstance(video_id, str) or not VIDEO_ID_PATTERN.fullmatch(video_id):
                 raise ValueError
+            if video_id in seen and deduplicate:
+                continue
             if video_id in seen or not all(isinstance(value, str) and value.strip() for value in (title, channel_title, published_at)):
                 raise ValueError
             seen.add(video_id)
@@ -56,7 +58,7 @@ def normalize_videos(payload, *, synthetic=False):
     return videos
 
 
-def search_videos(query, api_key):
+def search_videos(query, api_key, *, published_after=None, deduplicate=False):
     query = validate_query(query)
     parameters = {
         "part": "snippet", "type": "video", "q": query, "order": "relevance",
@@ -64,8 +66,11 @@ def search_videos(query, api_key):
         "fields": "items(id(kind,videoId),snippet(title,channelTitle,publishedAt))",
         "key": api_key,
     }
+    if published_after is not None:
+        parameters["publishedAfter"] = published_after
     api_request = request.Request(SEARCH_ENDPOINT + "?" + parse.urlencode(parameters), headers={"Accept": "application/json"}, method="GET")
-    return normalize_videos(request_json(api_request, operation="search"))
+    payload = request_json(api_request, operation="search")
+    return normalize_videos(payload, deduplicate=True) if deduplicate else normalize_videos(payload)
 
 
 def main(argv=None):

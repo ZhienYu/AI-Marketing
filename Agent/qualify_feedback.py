@@ -166,10 +166,10 @@ def qualify_feedback(review, catalog=DEMO_CATALOG):
     }
 
 
-def qualify_batch(reviews, minimum_sample_size=20):
+def qualify_batch(reviews, minimum_sample_size=20, *, catalog=DEMO_CATALOG):
     if not isinstance(reviews, list) or type(minimum_sample_size) is not int or minimum_sample_size < 1:
         raise ValueError("Provide a synthetic review list and positive minimum sample size.")
-    results = [qualify_feedback(review) for review in reviews]
+    results = [qualify_feedback(review, catalog=catalog) for review in reviews]
     ids = [result["review_id"] for result in results]
     if len(ids) != len(set(ids)):
         raise ValueError("Duplicate review IDs; no double counting allowed.")
