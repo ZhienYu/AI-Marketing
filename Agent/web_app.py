@@ -1,155 +1,129 @@
-"""Local product discovery interface; real analysis remains unavailable."""
-
+"""Keyword-only automatic research UI; permission and payment checks stay server-side."""
+import time
+import hashlib
+import json
 import streamlit as st
-
-import orchestrator
-import real_pipeline
-
-
-RESULT_KEYS = ("live_discovery", "live_preview", "selected_video", "ui_error", "multi_result")
+from analysis_control import load_config, analysis_readiness
+from automatic_research import start_research, inspect_collection
+from consumer_needs import PURPOSES
+from session_memory import SessionResult
 
 
 def clear_results():
-    for key in RESULT_KEYS:
+    stored = st.session_state.get("research_result")
+    if isinstance(stored, SessionResult):
+        stored.clear()
+    for key in ("research_result", "result_expiry", "paid_confirmed", "ui_error"):
         st.session_state.pop(key, None)
-
-
-def clear_preview():
-    st.session_state.pop("live_preview", None)
-    st.session_state.pop("ui_error", None)
-
-
-def friendly_error(failure):
-    message = str(failure)
-    if "commentsDisabled" in message:
-        return "这个视频已关闭评论。请选择另一个视频，再点击读取。"
-    if any(marker in message for marker in ("quotaExceeded", "dailyLimitExceeded", "http=429")):
-        return "YouTube 配额或访问频率已达到限制。请查看 Google Cloud 配额，稍后再试。"
-    if any(marker in message for marker in ("keyInvalid", "API_KEY_INVALID", "YOUTUBE_API_KEY", "Cannot read Agent/.env")):
-        return "本机 YouTube 凭据未就绪。请自行检查本地配置，不要将密钥粘贴到网页或聊天中。"
-    if any(marker in message for marker in ("SERVICE_DISABLED", "accessNotConfigured", "http=403", "API_KEY_SERVICE_BLOCKED")):
-        return "YouTube 拒绝了请求。请检查服务是否启用，以及本机凭据的服务权限和应用限制。"
-    if "ssl" in message.casefold():
-        return "安全连接校验未通过。请检查系统时间、证书及网络设置，不要关闭证书校验。"
-    if any(marker in message for marker in ("connection_reset", "timeout", "category=dns", "Connection failed", "Connection was")):
-        return "连接 YouTube 时遇到网络波动。本次有限尝试已结束，请稍后手动重试；没有保存真实评论。"
-    if "http=404" in message or "videoNotFound" in message:
-        return "这个视频已不可用。请重新搜索或选择另一个公开视频。"
-    if "non-empty keyword" in message or "keyword must be text" in message:
-        return "请输入 1–200 个字符的产品名称或品类，且不要包含控制字符。"
-    return "本次操作未完成。请检查输入和本地配置后重试；未显示原始错误详情，以保护敏感信息。"
-
-
-def render_discovery(query, *, privacy_accepted):
-    months = st.selectbox("视频发布时间范围", [3, 6, 12], index=1, format_func=lambda value: f"最近 {value} 个月", key="video_months", on_change=clear_results)
-    st.caption("自动获取最多五个视频，每个视频最近一页最多十条顶层评论；时间范围仅筛选视频，不筛选评论。结果仅在会话内存中预览。")
-    st.caption("跨频道汇总展示的适用许可仍待确认；API 可读取不等于该汇总用途已获准公开部署。")
-    if st.button("自动获取多视频评论", type="primary", key="research_multi", disabled=not privacy_accepted) and privacy_accepted:
-        clear_results()
-        try:
-            with st.spinner("正在依次读取视频评论，最多六个单页请求…"):
-                st.session_state.multi_result = orchestrator.multi_video_research(query, months=months, live=True)
-        except Exception as failure:
-            st.session_state.ui_error = friendly_error(failure)
-    batch = st.session_state.get("multi_result")
-    if batch:
-        columns = st.columns(3)
-        for column, label, value in zip(columns, ("搜索返回视频", "获取到评论的视频", "去重后实际评论"), (batch["searched_videos"], batch["videos_with_comments"], batch["comment_count"])):
-            column.metric(label, value)
-        st.caption("视频发布时间下限（UTC）：" + batch["published_after"])
-        for row in batch["videos"]:
-            with st.expander(row["video"]["title"]):
-                st.text("Video ID: " + row["video"]["video_id"] + " · " + row["video"]["published_at"])
-                st.link_button("YouTube 视频来源", row["video"]["video_url"])
-                st.text("状态：" + row["status"] + " · 评论数：" + str(len(row["comments"])))
-                if row["failure_reason"]:
-                    st.warning(row["failure_reason"])
-                if row["status"] == "empty":
-                    st.info("本页没有可展示的新评论，不代表视频从未有评论。")
-                for comment in row["comments"]:
-                    st.text(comment["review_text"])
-                    st.text("Comment ID: " + comment["comment_id"] + " · " + comment["published_at"])
-                    st.link_button("YouTube 评论来源", comment["source_url"])
-        st.caption("仅为本次实际获取数量，不是消费者情绪或品牌指标。无资格筛选、Qwen 或报告。")
-    st.divider()
-    st.caption("可选：以下保留单视频手动预览工具，无需用它完成多视频获取。")
-    st.info("LIVE READ-ONLY · 数据来源：YouTube。最多搜索 5 个视频，读取所选视频最多 10 条顶层评论，预览前三条。")
-    st.caption("仅点击搜索或读取按钮才调用 API；暂时网络错误最多尝试两次。刷新、选片不会自动请求。")
-    if st.button("搜索 YouTube 视频", type="primary", key="search_live", disabled=not privacy_accepted) and privacy_accepted:
-        clear_results()
-        try:
-            query = orchestrator.youtube_search.validate_query(query)
-            with st.spinner("正在搜索公开视频…"):
-                st.session_state.live_discovery = orchestrator.discover_live_videos(query, live=True)
-        except Exception as failure:
-            st.session_state.ui_error = friendly_error(failure)
-    discovery = st.session_state.get("live_discovery")
-    if discovery:
-        videos = discovery["videos"][:5]
-        st.caption("当前搜索关键词：" + discovery["query"])
-        if not videos:
-            st.info("没有找到视频。请调整关键词后重新点击搜索。")
-        else:
-            st.subheader("选择一个视频")
-            for index, video in enumerate(videos, 1):
-                st.text(f"{index}. {video['title']}")
-                st.text(f"频道：{video['channel_title']} · 发布：{video['published_at']}")
-                st.link_button("在 YouTube 查看视频 " + str(index), video["video_url"])
-            ids = [video["video_id"] for video in videos]
-            st.radio("要读取的视频", ids, format_func=lambda video_id: str(ids.index(video_id) + 1) + ". " + video_id, key="selected_video", on_change=clear_preview)
-            if st.button("读取所选视频评论", key="read_comments", disabled=not privacy_accepted) and privacy_accepted:
-                clear_preview()
-                try:
-                    with st.spinner("正在读取评论，仅预览前三条…"):
-                        preview = orchestrator.preview_live_video(discovery, st.session_state.selected_video, live=True)
-                        st.session_state.live_preview = real_pipeline.build_read_only_preview(preview)
-                except Exception as failure:
-                    st.session_state.ui_error = friendly_error(failure)
-    if st.session_state.get("ui_error"):
-        st.error(st.session_state.ui_error)
-    preview = st.session_state.get("live_preview")
-    if preview:
-        st.subheader("公开评论预览")
-        st.caption(f"读取 {preview['count']} 条，仅展示最多 3 条，每条正文最多 240 字符。品牌保持 unknown。")
-        st.caption("本次采集时间（UTC）：" + preview["collected_at"])
-        st.caption("证据质量：not_assessed（尚未筛选）；不据此判断是否购买、使用过或表达正负情绪。")
-        if not preview["comments"]:
-            st.info("请求成功，但该视频没有返回公开顶层评论。")
-        for comment in preview["comments"]:
-            with st.container(border=True):
-                st.text(comment["review_text"])
-                st.text("review_id=" + comment["review_id"] + " · 发布：" + comment["published_at"])
-                st.link_button("在 YouTube 查看评论来源", comment["source_url"])
-        st.caption("短预览仅保留在当前会话内存，不写入文件；修改关键词、切换视频或清除结果后移除。")
 
 
 def main():
     st.set_page_config(page_title="Product Insight Agent", page_icon="🔎", layout="wide")
-    # Discard stale state after upgrading an already-running older Demo UI.
-    for key in ("demo_bundle", "mode"):
+    # Remove legacy preview/demo state when upgrading an existing browser session.
+    for key in ("demo_bundle", "mode", "multi_result", "live_preview", "live_discovery", "selected_video"):
         st.session_state.pop(key, None)
-    with st.sidebar:
-        st.title("Product Insight")
-        st.caption("LOCAL MVP · YOUTUBE")
-        st.write("产品发现 → 评论预览 → 获准后进行分析")
-        st.button("清除本次结果", on_click=clear_results, key="clear_session")
-        st.caption("反馈筛选、Qwen 分析、竞品比较和报告暂未启用。")
-    st.title("发现产品相关的真实消费者讨论")
-    st.write("输入产品名称或品类，搜索 YouTube 视频并选择要查看的评论来源。")
-    query = st.text_input("产品关键词", value="", key="keyword", on_change=clear_results, placeholder="例如 Robotic Pool Cleaner")
-    with st.expander("本地数据使用说明与来源条款"):
-        st.write("本应用使用 YouTube API Services。仅在你点击按钮后，将关键词或所选视频 ID 发送给 Google；密钥仅供本机请求使用。")
-        st.write("多视频结果最多五十条完整评论，单视频工具仅三条短预览，均仅保留于当前 Streamlit 会话内存，不写入文件或日志，不发送给阿里云百炼或其他模型。修改关键词、时间范围、清除结果或停止本地服务可移除结果。")
-        st.write("本机浏览器与 Streamlit 建立会话连接；应用不添加广告、外部播放器或额外追踪工具。可通过侧栏清除结果，数据问题请联系本地项目维护者。公开发布前仍需补齐正式隐私政策、联系渠道和审查材料。")
-        st.markdown("使用本功能须遵守 [YouTube 服务条款](https://www.youtube.com/t/terms)；另见 [Google 隐私政策](https://policies.google.com/privacy)。阅读本说明不代表取得评论分析许可。")
-    accepted = st.checkbox("我已阅读并同意本地数据使用说明", key="privacy_accepted", on_change=clear_results)
-    render_discovery(query, privacy_accepted=accepted)
-    st.divider()
-    st.subheader("下一步：消费者洞察与研究报告")
-    st.selectbox("研究目的（分析待许可）", ["Product Improvement Research", "Competitor Research"], key="research_purpose")
-    st.caption("研究目的用于后续报告组织；当前不会对真实评论执行需求发现或分析。")
-    st.warning(real_pipeline.analysis_status()["reason"])
-    st.button("筛选反馈 → Qwen 分析 → 生成报告（待许可）", disabled=True, key="analyze_real")
+    if time.time() >= st.session_state.get("result_expiry", float("inf")):
+        clear_results()
+    if st.session_state.pop("payment_spent", False):
+        st.session_state.pop("paid_confirmed", None)
+    st.title("Product Insight Agent")
+    @st.fragment(run_every="60s")
+    def expiry_watch():
+        stored = st.session_state.get("research_result")
+        if stored is not None and not stored.snapshot():
+            clear_results()
+            st.rerun()
+    expiry_watch()
+    st.write("输入产品关键词，自动发现视频、获取反馈，并在获准后生成有来源证据的研究报告。")
+    query = st.text_input("产品关键词", key="keyword", placeholder="例如 Robotic Pool Cleaner", on_change=clear_results)
+    purpose = st.selectbox("研究类型", list(PURPOSES), format_func=PURPOSES.get, key="research_purpose", on_change=clear_results)
+    months = st.selectbox("视频发布时间范围", [3, 6, 12], index=1, format_func=lambda m: f"最近 {m} 个月", key="video_months", on_change=clear_results)
+    policy = load_config()
+    signature = hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()
+    if signature != st.session_state.get("policy_signature"):
+        clear_results()
+        st.session_state.policy_signature = signature
+    gates = analysis_readiness(policy, purpose)
+    ready = gates["ready"]
+    for name, label in (("youtube", "YouTube 用途授权"), ("provider", "Qwen 第三方处理"), ("technical", "技术与预算")):
+        st.caption(label + ("：记录检查通过" if gates[name]["ready"] else "：" + gates[name]["reason"]))
+    if not ready:
+        st.info("LIVE READ-ONLY：获取、标准 JSON 转换、字段校验及按视频预览可用。只有分析步骤受上方独立条件限制；这些条件不是 YouTube API 的技术限制。")
+        if st.session_state.get("research_result", {}).get("mode") == "research":
+            clear_results()
+    with st.expander("数据使用说明与运行上限"):
+        st.write("最多五个视频、每个最多十条顶层评论，不翻页。时间范围筛选视频，不是全部评论历史。真实正文和报告只在本次会话内存展示，不保存文件、不提供下载、不发送给模型以外的分析服务。")
+        st.write("没有分析许可时只读取预览。获准后才将必要原文发送至百炼北京地域；不发送密钥、评论者身份或来源链接。预算账本仅保存运行编号、日期和费用预留，不保存评论。")
+        st.write("结果在服务器内存最多保留十五分钟，后台定时清除；活动页面每分钟检查到期并移除展示。清除结果或停止本地服务也可移除服务器会话内容。")
+        st.markdown("本应用使用 YouTube API Services。使用须遵守 [YouTube 服务条款](https://www.youtube.com/t/terms)，另见 [Google 隐私政策](https://policies.google.com/privacy)。公开发布前仍需完成适用审查和正式隐私政策。")
+        st.checkbox("我已阅读并同意数据使用说明", key="privacy_accepted", on_change=clear_results)
+    paid = False
+    if ready:
+        st.caption(f"模型 {policy['model']} · 最多 {policy['max_calls']} 次调用 · 单次运行预留上限 ¥{policy['run_cny_limit']} · UTC 每日累计上限 ¥{policy['daily_cny_limit']}。")
+        if policy.get("budget_mode") == "single_request_estimate":
+            st.warning(f"首次单条实验：输入仅设 {policy['max_input_tokens']} Token 估算阈值，输出最多 {policy['max_output_tokens']} Token；Token 上界未严格验证，¥1 是预算目标而非实际账单硬保证。同一实验最多一次请求，失败或超时也不自动重试。")
+        else:
+            st.caption(f"每次最多输入 {policy['max_input_tokens']} / 输出 {policy['max_output_tokens']} Tokens；本次 Token 总预留上限 {policy['run_token_limit']}。超时和失败不退款、不自动重试。")
+        paid = st.checkbox("我确认本次研究会发起付费 Qwen 请求，并同意上述上限", key="paid_confirmed")
+    progress_bar = st.progress(0)
+    status = st.empty()
+    def progress(stage, completed, total):
+        labels = {"collecting": "自动获取视频与评论", "analyzing": "质量筛选与 Qwen 需求分析", "reporting": "生成证据报告"}
+        status.write(f"{labels[stage]}：{completed}/{total}")
+        base, span = {"collecting": (0, .25), "analyzing": (.25, .65), "reporting": (.9, .09)}[stage]
+        progress_bar.progress(min(.99, base + span * completed / max(total, 1)))
+    if st.button("开始研究", key="start_research", type="primary", disabled=not st.session_state.get("privacy_accepted")) and st.session_state.get("privacy_accepted"):
+        previous = st.session_state.pop("research_result", None)
+        if previous is not None:
+            previous.clear()
+        st.session_state.pop("ui_error", None)
+        try:
+            result = start_research(query, purpose, months, policy=policy, paid_confirmed=paid, progress=progress)
+            st.session_state.research_result = SessionResult(result)
+            st.session_state.result_expiry = time.time() + 900
+            progress_bar.progress(1.0)
+            status.write("本轮已结束。部分失败或预算停止请查看结果状态。")
+        except Exception:
+            st.session_state.ui_error = "本次研究未完成。请检查网络、API 配置、权限有效期及预算。未显示原始错误以保护密钥；不会自动重试付费模型请求。"
+        finally:
+            if ready:
+                st.session_state.payment_spent = True
+    if st.session_state.get("ui_error"):
+        st.error(st.session_state.ui_error)
+    result = st.session_state.get("research_result")
+    result = result.snapshot() if result is not None else None
+    if result:
+        if result["mode"] == "research":
+            st.markdown(result["report"])
+        else:
+            st.warning(result["reason"])
+        batch = result["batch"]
+        st.caption(f"本轮获取：{batch['searched_videos']} 个搜索结果，{batch['videos_with_comments']} 个有评论视频，{batch['comment_count']} 条去重评论。")
+        audit = result.get("audit") or inspect_collection(batch)["audit"]
+        st.caption(f"字段核验：实际 {audit['received_comments']} 条，标准 JSON 有效记录 {audit['valid_records']} 条，异常 {len(audit['issues'])} 项。brand=unknown 表示尚未确认品牌，证据质量尚未评估。")
+        st.caption("最近月份仅筛选视频发布时间；评论按最新顺序读取最多十条，不保证覆盖该时间段所有评论。")
+        if audit["issues"]:
+            st.warning("部分来源字段缺失或不一致；以下仅显示字段诊断，不进行分析。")
+            st.dataframe(audit["issues"], hide_index=True)
+        with st.expander("查看各视频原始来源和只读评论"):
+            for index, row in enumerate(batch["videos"], 1):
+                st.subheader(f"{index}. {row['video']['title']}")
+                st.caption(f"Video ID: {row['video']['video_id']} · 视频发布：{row['video']['published_at']} · 本视频 {len(row['comments'])} 条评论")
+                st.link_button("YouTube 视频", row["video"]["video_url"])
+                if row["failure_reason"]:
+                    st.warning(row["failure_reason"])
+                for number, comment in enumerate(row["comments"], 1):
+                    if len(comment["review_text"]) > 240:
+                        with st.expander(f"评论 {number} · 展开长评论"):
+                            st.text(comment["review_text"])
+                    else:
+                        st.text(comment["review_text"])
+                    st.caption(comment["comment_id"] + " · " + comment["published_at"])
+                    st.link_button("YouTube 评论", comment["source_url"])
+                if not row["comments"] and not row["failure_reason"]:
+                    st.caption("本视频未返回公开顶层评论。")
+                st.divider()
+        st.button("清除本次结果", key="clear_session", on_click=clear_results)
 
 
 if __name__ == "__main__":

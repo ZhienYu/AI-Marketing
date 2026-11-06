@@ -7,6 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 
 from classify_reviews import AGENT_DIR, CLASSIFICATION_FIELDS, ClassificationError, check_classification, save_json
+from classify_reviews import PRODUCT_ASPECTS
 
 
 ASPECT_ORDER = (
@@ -16,12 +17,24 @@ ASPECT_ORDER = (
 BRANDS = ("Brand A", "Brand B", "Brand C")
 
 
-def generate_insights(classified):
+def generate_insights(classified, *, execution=None):
     if not isinstance(classified, dict) or classified.get("mode") not in {"mock", "qwen"}:
         raise ClassificationError("Input must be a mock or qwen classification report.")
     results = classified.get("results")
     if not isinstance(results, list):
         raise ClassificationError("Input results must be an array.")
+    # Preserve historical comparison rows and include newer categories when observed.
+    observed = {
+        item.get("aspect") for row in results if isinstance(row, dict)
+        for item in (row["product_aspects"] if isinstance(row.get("product_aspects"), list) else [])
+        if isinstance(item, dict) and isinstance(item.get("aspect"), str)
+    }
+    aspect_order = ASPECT_ORDER + tuple(sorted((observed & PRODUCT_ASPECTS) - set(ASPECT_ORDER)))
+    if any(isinstance(row, dict) and str(row.get("source_platform", "")).casefold() == "youtube" for row in results):
+        from analysis_control import Execution
+        if not isinstance(execution, Execution):
+            raise ClassificationError("YouTube derived statistics require a server-approved execution; JSON/CSV is not an alternative.")
+        execution.check()
     brands = {}
     seen_ids = set()
     unknown_ids = []
@@ -51,7 +64,7 @@ def generate_insights(classified):
         if brand not in brands:
             brands[brand] = {
                 "sample_size": 0,
-                "aspect_ids": {aspect: {polarity: set() for polarity in ("Positive", "Negative", "Neutral")} for aspect in ASPECT_ORDER},
+                "aspect_ids": {aspect: {polarity: set() for polarity in ("Positive", "Negative", "Neutral")} for aspect in aspect_order},
                 "negative_feedback": defaultdict(set),
                 "pain_ids": defaultdict(set),
                 "pain_labels": {},
@@ -74,11 +87,11 @@ def generate_insights(classified):
         sample_size = data["sample_size"] if data else 0
         counts = {
             aspect: {polarity: len(data["aspect_ids"][aspect][polarity]) if data else 0 for polarity in ("Positive", "Negative", "Neutral")}
-            for aspect in ASPECT_ORDER
+            for aspect in aspect_order
         }
         negative_aspects = []
         if data:
-            for aspect in ASPECT_ORDER:
+            for aspect in aspect_order:
                 ids = data["aspect_ids"][aspect]["Negative"]
                 if ids:
                     negative_aspects.append({
@@ -95,7 +108,7 @@ def generate_insights(classified):
                 for pain, ids in data["pain_ids"].items()
             ], key=lambda item: (-item["review_count"], item["feedback"])) if data else [],
         }
-    for aspect in ASPECT_ORDER:
+    for aspect in aspect_order:
         comparison.append({"aspect": aspect, "brands": {
             brand: {"sample_size": data["sample_size"], **data["aspect_counts"][aspect]}
             for brand, data in output_brands.items()

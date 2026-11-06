@@ -23,7 +23,7 @@ class ClassifyReviewsTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.temp = Path(self.directory.name)
-        self.review = {"review_id": "1", "review_text": "Good cleaning"}
+        self.review = {"review_id": "1", "review_text": "Good cleaning", "source_platform": "synthetic"}
         self.classification = {
             "sentiment": "Positive", "positive_aspects": ["Good cleaning"], "pain_points": [],
             "product_aspects": [{"aspect": "Cleaning Performance", "sentiment": "Positive", "feedback": "Good cleaning"}],

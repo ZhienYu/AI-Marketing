@@ -21,7 +21,7 @@ BEIJING_BASE_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 SENTIMENTS = {"Positive", "Negative", "Neutral", "Mixed"}
 PRODUCT_ASPECTS = {
     "Battery Life", "Cleaning Performance", "Ease of Use", "Price",
-    "Maintenance", "Reliability", "Customer Support", "Other",
+    "Maintenance", "Reliability", "Navigation & Obstacle Handling", "Customer Support", "Other",
 }
 MAX_BATCH_SIZE = 20
 TOKEN_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
@@ -31,7 +31,7 @@ sentiment (Positive, Negative, Neutral, or Mixed), positive_aspects (array of sh
 English strings), pain_points (array of short English strings), product_aspects
 (array of objects, each with exactly aspect, sentiment, feedback).
 aspect must be one of: Battery Life, Cleaning Performance, Ease of Use, Price,
-Maintenance, Reliability, Customer Support, Other. Each aspect sentiment must be
+Maintenance, Reliability, Navigation & Obstacle Handling, Customer Support, Other. Each aspect sentiment must be
 Positive, Negative or Neutral, with feedback containing the specific supported
 feedback in a short English string. A review may have multiple aspects. If one
 aspect has both positive and negative feedback, use two entries with different
@@ -143,8 +143,24 @@ class NoRedirect(request.HTTPRedirectHandler):
         raise ClassificationError("API redirect refused; check the Beijing endpoint.")
 
 
-def classify_qwen(review, settings, model, *, research=False):
+def classify_qwen(review, settings, model, *, research=False, automatic=None):
+    if automatic is not None:
+        from analysis_control import Execution, ControlError
+        if not isinstance(automatic, Execution) or research:
+            raise ClassificationError("Invalid automatic execution context.", stop_batch=True)
+        policy = automatic.check()
+        if model != policy["model"] or review.get("source_platform") != "youtube" or review.get("is_synthetic") is not False:
+            raise ControlError("Model/source is outside this execution scope.")
+        if policy.get("budget_mode") == "single_request_estimate" and review.get("review_id") != policy["selected_review_id"]:
+            raise ControlError("Only the selected review is authorized for this single-request experiment.")
+    elif review.get("source_platform") != "synthetic":
+        raise ClassificationError("Non-synthetic Qwen analysis requires the server-side permission and budget path; CSV is not an alternative.", stop_batch=True)
     prompt = SYSTEM_PROMPT
+    user_message = {"review_text": review["review_text"]}
+    if automatic is not None:
+        from evidence_analysis import PROMPT, evidence_message
+        prompt = PROMPT
+        user_message = evidence_message(review["review_text"])
     if research:
         from consumer_needs import RESEARCH_PROMPT, require_synthetic
         require_synthetic(review)
@@ -161,14 +177,18 @@ def classify_qwen(review, settings, model, *, research=False):
         "model": model,
         "messages": [
             {"role": "system", "content": prompt},
-            {"role": "user", "content": json.dumps({"review_text": review["review_text"]})},
+            {"role": "user", "content": json.dumps(user_message, ensure_ascii=False)},
         ],
         "response_format": {"type": "json_object"},
         "enable_thinking": False,
         "temperature": 0,
-        "max_tokens": 3000 if research else 1000,
+        "max_tokens": automatic.check()["max_output_tokens"] if automatic is not None else 3000 if research else 1000,
         "stream": False,
     }
+    if automatic is not None:
+        if base_url != policy["api_base_url"]:
+            raise ControlError("Endpoint does not match the verified server configuration.")
+        automatic.reserve(payload)
     http_request = request.Request(
         base_url + "/chat/completions",
         data=json.dumps(payload).encode("utf-8"),
@@ -190,12 +210,27 @@ def classify_qwen(review, settings, model, *, research=False):
     except (ValueError, UnicodeError):
         raise ClassificationError("Qwen returned invalid JSON; output was not saved.") from None
     usage = extract_usage(body)
+    raw_model_text = None
     try:
+        if automatic is not None and (usage.get("prompt_tokens", 0) > policy["max_input_tokens"]
+            or usage.get("completion_tokens", 0) > policy["max_output_tokens"]):
+            raise ClassificationError("Reported usage exceeded the reserved token bounds; batch stopped.", stop_batch=True)
+        if automatic is not None and body.get("model") != model:
+            raise ClassificationError("Qwen response model differs from the pinned snapshot; batch stopped.", stop_batch=True)
         choice = body["choices"][0]
+        raw_model_text = choice["message"]["content"]
         if choice["finish_reason"] != "stop":
             raise ClassificationError("Qwen response incomplete; output was not saved. No automatic retry.")
-        decoded = json.loads(choice["message"]["content"])
-        if research:
+        decoded = json.loads(raw_model_text)
+        if automatic is not None:
+            from evidence_analysis import process_evidence_analysis
+            classification = process_evidence_analysis(decoded, review)
+            classification["raw_json"] = raw_model_text
+            if classification["status"] == "Invalid":
+                failure = ClassificationError(classification["issues"][0]["reason"])
+                failure.processing = classification
+                raise failure
+        elif research:
             from consumer_needs import check_research_output
             classification = check_research_output(decoded, review)
         else:
@@ -203,9 +238,14 @@ def classify_qwen(review, settings, model, *, research=False):
         return classification, usage
     except ClassificationError as failure:
         failure.usage = usage
+        if automatic is not None:
+            failure.raw_model_text = raw_model_text
         raise
     except (KeyError, IndexError, TypeError, ValueError):
-        raise ClassificationError("Qwen response has invalid structure; output was not saved.", usage=usage) from None
+        failure = ClassificationError("Qwen response has invalid structure.", usage=usage)
+        if automatic is not None:
+            failure.raw_model_text = raw_model_text
+        raise failure from None
 
 
 def classify_mock(review, fixtures):
@@ -294,6 +334,8 @@ def load_checkpoint(path, reviews, mode, model, *, adopt_legacy=False):
 
 
 def analyze_batch(reviews, validation, mode, model, output, *, settings=None, fixtures=None, previous=None):
+    if any(str(row.get("source_platform", "")).casefold() == "youtube" for row in reviews):
+        raise ClassificationError("YouTube analysis must use the permission-controlled in-memory pipeline; CSV batch persistence is disabled.")
     previous = previous or {}
     retained = previous.get("results", [])
     report = {

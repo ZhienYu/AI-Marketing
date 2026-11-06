@@ -1,16 +1,14 @@
-"""UI regression tests. All API responses and text below are synthetic."""
-
+"""Automatic UI boundary tests; substitute responses only, no live requests."""
 import contextlib
 import sys
-import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-AGENT_DIR = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(AGENT_DIR))
-import orchestrator
-import real_pipeline
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from test_automatic_research import batch, policy
+import automatic_research
+import classify_reviews
 
 try:
     from streamlit.testing.v1 import AppTest
@@ -18,221 +16,149 @@ except ImportError:
     AppTest = None
 
 
-@unittest.skipIf(AppTest is None, "Install Agent/requirements.txt to run Streamlit interface tests")
+@unittest.skipIf(AppTest is None, "Install Agent/requirements.txt for UI tests")
 class WebAppTests(unittest.TestCase):
     def setUp(self):
-        self.directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.directory.cleanup)
-        self.temp = Path(self.directory.name)
         self.stack = contextlib.ExitStack()
         self.addCleanup(self.stack.close)
-        self.forbidden = []
-        for module, function in (
-            (orchestrator.youtube_comments, "load_youtube_key"),
-            (orchestrator.youtube_search, "search_videos"),
-            (orchestrator.youtube_comments, "fetch_comments"),
-            (orchestrator.qualify_feedback, "qualify_feedback"),
-            (orchestrator.qualify_feedback, "qualify_batch"),
-            (orchestrator.classify_reviews, "load_local_settings"),
-            (orchestrator.classify_reviews, "classify_qwen"),
-            (orchestrator.classify_reviews, "analyze_batch"),
-            (orchestrator.generate_insights, "generate_insights"),
-            (orchestrator.generate_report, "render_report"),
-            (orchestrator.classify_reviews, "save_json"),
-            (orchestrator.generate_report, "save_report"),
-            (orchestrator, "run_mock_pipeline"),
-            (real_pipeline, "run_real_analysis"),
-        ):
-            self.forbidden.append(self.stack.enter_context(patch.object(module, function, side_effect=AssertionError("Forbidden processing in UI test: " + function))))
-        self.addCleanup(self.assert_no_forbidden_calls)
-        videos = orchestrator.youtube_search.normalize_videos(orchestrator.read_fixture("youtube_search_mock.json"), synthetic=True)
-        self.discovery = {"mode": "live-read-only", "query": "Robotic Pool Cleaner", "videos": videos}
-        self.live_search = self.stack.enter_context(patch.object(orchestrator, "discover_live_videos", return_value=self.discovery))
-        self.preview = {
-            "mode": "live-read-only", "video_id": "TESTvideo01", "collected_at": "2026-10-31T12:00:00+00:00",
-            "comments": [{
-                "comment_id": "synthetic-ui-" + str(index), "review_text": "SYNTHETIC UI TEST " + "x" * 300,
-                "source_url": "https://www.youtube.com/watch?v=TESTvideo01&lc=synthetic-ui-" + str(index),
-                "published_at": "2026-01-01T00:00:00Z", "brand": "unknown", "is_synthetic": True,
-            } for index in range(10)],
-        }
-        self.live_read = self.stack.enter_context(patch.object(orchestrator, "preview_live_video", return_value=self.preview))
-        self.app = AppTest.from_file(str(AGENT_DIR / "web_app.py"), default_timeout=15)
-
-    def assert_no_forbidden_calls(self):
-        for mock in self.forbidden:
-            mock.assert_not_called()
+        self.policy = self.stack.enter_context(patch("analysis_control.load_config", return_value=None))
+        self.start = self.stack.enter_context(patch.object(automatic_research, "start_research", return_value={"mode": "live-read-only", "batch": batch(), "report": None, "reason": "权限未配置"}))
+        self.settings = self.stack.enter_context(patch.object(classify_reviews, "load_local_settings", side_effect=AssertionError("No real key read")))
+        self.app = AppTest.from_file(str(Path(__file__).resolve().parents[1] / "web_app.py"))
 
     def ready(self):
         self.app.run()
         self.app.text_input(key="keyword").set_value("Robotic Pool Cleaner").run()
         self.app.checkbox(key="privacy_accepted").check().run()
 
-    def search_and_read(self):
-        self.ready()
-        self.app.button(key="search_live").click().run()
-        self.app.button(key="read_comments").click().run()
-
-    def test_multi_video_button_rerun_and_clear(self):
-        self.ready()
-        result = {"searched_videos": 5, "videos_with_comments": 1, "comment_count": 10, "published_after": "2026-05-04T00:00:00Z", "videos": []}
-        with patch.object(orchestrator, "multi_video_research", return_value=result) as multi:
-            self.app.button(key="research_multi").click().run()
-            self.assertFalse(self.app.exception)
-            multi.assert_called_once_with("Robotic Pool Cleaner", months=6, live=True)
-            self.assertEqual([m.value for m in self.app.metric], ["5", "1", "10"])
-            self.app.run()
-            multi.assert_called_once()
-            self.app.selectbox(key="video_months").set_value(3).run()
-            self.assertNotIn("multi_result", self.app.session_state)
-            multi.assert_called_once()
-        self.assertTrue(self.app.button(key="analyze_real").disabled)
-
-    def test_multi_failure_has_no_raw_exception_or_stale_results(self):
-        self.ready()
-        with patch.object(orchestrator, "multi_video_research", side_effect=RuntimeError("FAKE_SECRET https://example.com")):
-            self.app.button(key="research_multi").click().run()
-        self.assertNotIn("multi_result", self.app.session_state)
-        self.assertNotIn("FAKE_SECRET", self.app.error[0].value)
-
-    def test_initial_page_has_real_search_without_demo_csv_or_requests(self):
+    def test_initial_ui_has_only_research_inputs_and_no_upload_or_requests(self):
         self.app.run()
         self.assertFalse(self.app.exception)
-        self.assertEqual(self.app.text_input(key="keyword").value, "")
-        self.assertIn("LIVE READ-ONLY", self.app.info[0].value)
-        self.assertEqual(len(self.app.radio), 0)
-        self.assertEqual(len(self.app.get("file_uploader")), 0)
-        self.assertEqual(len(self.app.get("download_button")), 0)
-        self.assertNotIn("Demo", " ".join(button.label for button in self.app.button))
-        self.live_search.assert_not_called()
-        self.live_read.assert_not_called()
+        self.assertEqual(len(self.app.text_input), 1)
+        self.assertEqual(len(self.app.selectbox), 2)
+        self.assertFalse(self.app.get("file_uploader"))
+        self.assertFalse(self.app.get("download_button"))
+        self.start.assert_not_called()
 
-    def test_privacy_notice_does_not_enable_analysis_or_send_request(self):
-        self.app.run()
-        self.assertTrue(self.app.button(key="search_live").disabled)
+    def test_read_only_start_is_explicit_and_does_not_load_keys(self):
         self.ready()
-        self.assertFalse(self.app.button(key="search_live").disabled)
-        self.assertTrue(self.app.button(key="analyze_real").disabled)
-        self.assertIn("许可", self.app.warning[0].value)
-        self.live_search.assert_not_called()
-        self.live_read.assert_not_called()
-
-    def test_search_requires_click_and_read_requires_second_click(self):
-        self.ready()
-        self.app.run()
-        self.live_search.assert_not_called()
-        self.app.button(key="search_live").click().run()
-        self.live_search.assert_called_once_with("Robotic Pool Cleaner", live=True)
-        self.live_read.assert_not_called()
-        self.assertEqual(len(self.app.radio(key="selected_video").options), 5)
-        self.app.run()
-        self.live_search.assert_called_once()
-        self.live_read.assert_not_called()
-        self.app.button(key="read_comments").click().run()
-        self.live_read.assert_called_once_with(self.discovery, "TESTvideo01", live=True)
+        self.start.assert_not_called()
+        self.app.button(key="start_research").click().run()
         self.assertFalse(self.app.exception)
+        self.assertEqual(self.start.call_count, 1)
+        self.assertIsNone(self.start.call_args.kwargs["policy"])
+        self.assertFalse(self.start.call_args.kwargs["paid_confirmed"])
+        self.settings.assert_not_called()
+        self.assertIn("research_result", self.app.session_state)
 
-    def test_preview_keeps_only_three_short_texts_and_no_files(self):
-        self.search_and_read()
-        stored = self.app.session_state["live_preview"]
-        self.assertEqual(stored["count"], 10)
-        self.assertEqual(len(stored["comments"]), 3)
-        self.assertTrue(all(len(row["review_text"]) == 240 for row in stored["comments"]))
-        self.assertEqual(list(self.temp.iterdir()), [])
-        self.assertEqual(len(self.app.get("download_button")), 0)
-        self.assertEqual(len(self.app.metric), 0)
-        self.assertEqual(len(self.app.tabs), 0)
-        self.assertTrue(self.app.button(key="analyze_real").disabled)
-        self.app.run()
-        self.live_read.assert_called_once()
-
-    def test_preview_provenance_preserves_source_time_and_unassessed_quality(self):
-        self.search_and_read()
-        row = self.app.session_state["live_preview"]["comments"][0]
-        self.assertEqual(row["source_url"], self.preview["comments"][0]["source_url"])
-        self.assertEqual(row["review_id"], "youtube:synthetic-ui-0")
-        self.assertEqual(row["video_id"], self.preview["video_id"])
-        self.assertEqual(row["collected_at"], self.preview["collected_at"])
-        self.assertEqual(row["brand"], "unknown")
-        self.assertEqual(row["evidence_quality"]["status"], "not_assessed")
-        self.assertIsNone(row["feedback_type"])
-
-    def test_keyword_change_clears_results_without_requests(self):
-        self.search_and_read()
-        self.app.text_input(key="keyword").set_value("Cordless Vacuum").run()
-        self.assertNotIn("live_preview", self.app.session_state)
-        self.assertNotIn("live_discovery", self.app.session_state)
-        self.live_search.assert_called_once()
-        self.live_read.assert_called_once()
-
-    def test_selection_change_clears_preview_without_request(self):
-        self.search_and_read()
-        self.app.radio(key="selected_video").set_value("TESTvideo02").run()
-        self.assertNotIn("live_preview", self.app.session_state)
-        self.live_read.assert_called_once()
-
-    def test_clear_drops_live_memory_without_requests(self):
-        self.search_and_read()
-        self.app.button(key="clear_session").click().run()
-        self.assertNotIn("live_preview", self.app.session_state)
-        self.assertNotIn("live_discovery", self.app.session_state)
-        self.live_search.assert_called_once()
-        self.live_read.assert_called_once()
-
-    def test_revoking_notice_clears_results_and_disables_search(self):
-        self.search_and_read()
-        self.app.checkbox(key="privacy_accepted").uncheck().run()
-        self.assertNotIn("live_preview", self.app.session_state)
-        self.assertNotIn("live_discovery", self.app.session_state)
-        self.assertTrue(self.app.button(key="search_live").disabled)
-        self.live_search.assert_called_once()
-
-    def test_old_demo_session_is_discarded_without_execution(self):
-        self.app.session_state["demo_bundle"] = {"report": "SYNTHETIC OLD UI REPORT"}
-        self.app.session_state["mode"] = "Demo Mode"
-        self.app.run()
-        self.assertNotIn("demo_bundle", self.app.session_state)
-        self.assertNotIn("mode", self.app.session_state)
-        self.assertEqual(len(self.app.get("download_button")), 0)
-
-    def test_errors_are_friendly_without_secret_or_url(self):
-        self.live_search.side_effect = orchestrator.youtube_comments.YouTubeReadError("category=connection_reset https://example.com/?key=FAKE_SECRET")
+    def test_refresh_never_repeats_requests(self):
         self.ready()
-        self.app.button(key="search_live").click().run()
+        self.app.button(key="start_research").click().run()
+        self.app.run()
+        self.start.assert_called_once()
+
+    def test_preview_groups_by_video_and_shows_metadata_audit(self):
+        self.ready()
+        self.app.button(key="start_research").click().run()
         self.assertFalse(self.app.exception)
-        self.assertIn("网络波动", self.app.error[0].value)
+        self.assertIn(batch()["videos"][0]["video"]["title"], self.app.subheader[0].value)
+        captions = " ".join(c.value for c in self.app.caption)
+        self.assertIn("实际 1 条", captions)
+        self.assertIn("异常 0 项", captions)
+        self.start.assert_called_once()
+
+    def test_long_comment_is_collapsible(self):
+        self.start.return_value["batch"]["videos"][0]["comments"][0]["review_text"] *= 10
+        self.ready()
+        self.app.button(key="start_research").click().run()
+        self.assertFalse(self.app.exception)
+        self.assertTrue(any("展开长评论" in e.label for e in self.app.expander))
+
+    def test_paid_permission_needs_additional_explicit_confirmation(self):
+        self.policy.return_value = policy()
+        self.ready()
+        self.assertFalse(self.app.button(key="start_research").disabled)
+        self.app.checkbox(key="paid_confirmed").check().run()
+        self.assertFalse(self.app.button(key="start_research").disabled)
+        self.start.assert_not_called()
+        self.app.button(key="start_research").click().run()
+        self.assertTrue(self.start.call_args.kwargs["paid_confirmed"])
+
+    def test_unpaid_start_remains_available_for_collection(self):
+        self.policy.return_value = policy()
+        self.ready()
+        self.app.button(key="start_research").click().run()
+        self.assertFalse(self.app.exception)
+        self.assertFalse(self.start.call_args.kwargs["paid_confirmed"])
+        self.assertEqual(len(self.app.subheader), 1)
+
+    def test_technical_issue_displays_separately_from_youtube_permission(self):
+        self.policy.return_value = {**policy(), "token_bound_verified": False}
+        self.ready()
+        captions = " ".join(c.value for c in self.app.caption)
+        self.assertIn("YouTube 用途授权：记录检查通过", captions)
+        self.assertIn("技术与预算：模型", captions)
+        self.assertFalse(self.app.button(key="start_research").disabled)
+
+    def test_config_price_changes_revoke_stale_paid_confirmation(self):
+        self.policy.return_value = policy()
+        self.ready()
+        self.app.checkbox(key="paid_confirmed").check().run()
+        self.policy.return_value = {**policy(), "run_cny_limit": "0.9"}
+        self.app.run()
+        self.assertFalse(self.app.checkbox(key="paid_confirmed").value)
+        self.assertFalse(self.app.button(key="start_research").disabled)
+
+    def test_each_paid_run_requires_fresh_confirmation(self):
+        self.policy.return_value = policy()
+        self.ready()
+        self.app.checkbox(key="paid_confirmed").check().run()
+        self.app.button(key="start_research").click().run()
+        self.app.run()
+        self.assertFalse(self.app.checkbox(key="paid_confirmed").value)
+        self.assertFalse(self.app.button(key="start_research").disabled)
+        self.start.assert_called_once()
+
+    def test_purpose_keyword_and_window_changes_clear_result(self):
+        self.ready()
+        for key, value in (("keyword", "Vacuum"), ("research_purpose", "competitor"), ("video_months", 3)):
+            self.app.button(key="start_research").click().run()
+            widget = self.app.text_input(key=key) if key == "keyword" else self.app.selectbox(key=key)
+            widget.set_value(value).run()
+            self.assertNotIn("research_result", self.app.session_state)
+        self.assertEqual(self.start.call_count, 3)
+
+    def test_report_display_uses_returned_result_not_new_generation(self):
+        self.policy.return_value = policy()
+        self.start.return_value = {"mode": "research", "batch": batch(), "report": "EXISTING RESPONSE SENTINEL"}
+        self.ready()
+        self.app.checkbox(key="paid_confirmed").check().run()
+        self.app.button(key="start_research").click().run()
+        self.assertIn("EXISTING RESPONSE SENTINEL", " ".join(m.value for m in self.app.markdown))
+        self.app.run()
+        self.start.assert_called_once()
+        self.policy.return_value = None
+        self.app.run()
+        self.assertNotIn("research_result", self.app.session_state)
+
+    def test_friendly_error_removes_old_result_without_sensitive_details(self):
+        self.ready()
+        self.app.button(key="start_research").click().run()
+        self.start.side_effect = RuntimeError("FAKE_SECRET https://private.example")
+        self.app.button(key="start_research").click().run()
+        self.assertNotIn("research_result", self.app.session_state)
         self.assertNotIn("FAKE_SECRET", self.app.error[0].value)
         self.assertNotIn("https://", self.app.error[0].value)
-        self.assertNotIn("live_discovery", self.app.session_state)
 
-    def test_comment_failure_drops_old_preview_and_keeps_search(self):
-        self.search_and_read()
-        self.live_read.side_effect = orchestrator.youtube_comments.YouTubeReadError("http=403; reason=commentsDisabled; key=FAKE_PRIVATE")
-        self.app.button(key="read_comments").click().run()
-        self.assertNotIn("live_preview", self.app.session_state)
-        self.assertIn("live_discovery", self.app.session_state)
-        self.assertIn("关闭评论", self.app.error[0].value)
-        self.assertNotIn("FAKE_PRIVATE", self.app.error[0].value)
-
-    def test_empty_search_and_comments_have_clear_messages(self):
-        self.live_search.return_value = {**self.discovery, "videos": []}
+    def test_clear_and_expiry_remove_results(self):
         self.ready()
-        self.app.button(key="search_live").click().run()
-        self.assertIn("没有找到视频", self.app.info[-1].value)
-        self.live_read.assert_not_called()
-        self.live_search.return_value = self.discovery
-        self.live_read.return_value = {**self.preview, "comments": []}
-        self.app.button(key="search_live").click().run()
-        self.app.button(key="read_comments").click().run()
-        self.assertIn("没有返回", self.app.info[-1].value)
-
-    def test_invalid_keyword_is_rejected_before_discovery(self):
-        self.ready()
-        for keyword in (" ", "x" * 201):
-            self.app.text_input(key="keyword").set_value(keyword).run()
-            self.app.button(key="search_live").click().run()
-            self.assertIn("1–200", self.app.error[0].value)
-        self.live_search.assert_not_called()
+        self.app.button(key="start_research").click().run()
+        self.app.button(key="clear_session").click().run()
+        self.assertNotIn("research_result", self.app.session_state)
+        self.app.button(key="start_research").click().run()
+        self.app.session_state["result_expiry"] = 0
+        self.app.run()
+        self.assertNotIn("research_result", self.app.session_state)
 
 
 if __name__ == "__main__":

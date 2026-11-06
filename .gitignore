@@ -8,3 +8,5 @@ venv/
 !.env.example
 *.key
 *.pem
+Agent/config/research_access.json
+Agent/.runtime/

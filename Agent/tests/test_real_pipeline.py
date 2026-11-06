@@ -29,11 +29,12 @@ class RealPipelineTests(unittest.TestCase):
         }
 
     def test_status_cannot_be_enabled_by_mutating_return_value(self):
-        status = real_pipeline.analysis_status()
-        self.assertFalse(status["enabled"])
-        self.assertEqual(status["code"], "youtube_analysis_not_authorized")
-        status["enabled"] = True
-        self.assertFalse(real_pipeline.analysis_status()["enabled"])
+        with patch("analysis_control.load_config", return_value=None):
+            status = real_pipeline.analysis_status()
+            self.assertFalse(status["enabled"])
+            self.assertEqual(status["code"], "analysis_not_ready")
+            status["enabled"] = True
+            self.assertFalse(real_pipeline.analysis_status()["enabled"])
 
     def test_analysis_rejected_before_input_is_accessed(self):
         class Untouchable:

@@ -5,6 +5,120 @@ An AI-powered tool for consumer insights and competitive intelligence.
 ## Project Status
 MVP Development
 
+### Phase 3.2：单一事实与证据契约（本轮无模型请求）
+
+真实模型输出升级为 `real-analysis-3`，只包含版本、多标签反馈证据、品牌/型号、整体情绪、一份 `facts` 和 `potential_needs`。事实用 kind 区分场景、痛点、明确需求；为保留正面/混合情绪功能，已有明确正面产品反馈时可用 positive_feedback 事实。每个产品反馈事实仅带一次属性类别，不再输出三套痛点文本。型号未明确提及统一为字符串 `unknown`，证据为空数组，不接受 null 或 unk。
+
+每个事实只需 `id`、`kind`、`summary`、`quotes`；痛点/正面产品反馈另有 `aspect`。事实不再被强制填写不确定性原因或验证步骤。`quotes` 是独立原文连续片段的数组：不能插入省略号、规范化空格、改标点或合并不连续句子；`summary` 可以概括，不能冒充原话。
+
+潜在需求只输出 `summary`、`based_on`（事实 ID）、`uncertainty` 和 `validation_method`，明确属于推断。模型不用重复事实引用；Python 根据 based_on 拷贝相应原文片段，保持数组及每个字符串原样，不拼接出新引句。推断优先描述消费者希望得到的功能，原文未支持的扭矩、传感器、固件或算法原因不能写入事实或当成已知技术需求。窄词汇规则只能拦截部分明显越界，不能替代人工语义核验。
+
+`compatibility_view` 在正式 Schema 和证据校验后，自动生成旧分类痛点、属性、主反馈类型及需求视图；从同一事实生成，模型不再负责重复文本一致性。原始 v3 输出保持不变，历史失败响应不会被悄悄修补成 v3。报告只对推断展示不确定性与验证建议，并逐条展示独立引用。
+
+本地私有回归资料保留前两次真实响应和明确标注的人工期望，不作为模型输出或研究报告。历史合成接口/测试继续保留。第二次实验配置和预算账本未清零、未创建第三次付费机会；配置仍绑定 v2，因此不能用于发送新的 v3 提示词，搜索、获取和预览仍正常。启用下一次真实实验必须另行准备配置并取得新的付费确认。本轮不发 API 请求、不生成新的 Mock 报告。
+
+### Phase 3.1：真实响应质量修正（第二次请求尚未确认）
+
+首次真实 Qwen 请求使用 695 输入 / 436 输出 Token，JSON 可解析，但因类别遗漏、品牌漏识别、痛点矛盾和字段类型错误被拒绝。没有把失败响应修补成有效模型结果。
+
+`real_analysis_schema.py` 中的 `real-analysis-2` 是真实分析唯一契约：同一份定义驱动 JSON Schema 校验、提示词字段说明和报告读取。`jsonschema` 已明确列入依赖；请求仍用 JSON 对象模式，模型返回后执行正式 Schema 与跨字段/证据校验，不把 JSON 语法成功当成业务成功。历史合成数据接口继续使用原有契约。
+
+- `feedback_types` 支持多标签，`feedback_type` 保留兼容的主标签；有真实使用证据时使用体验优先，并分别保留购买咨询引句。标签数不能相加当作样本量。
+- 品牌和型号必须引用评论原文，禁止用视频标题；明确“试用某品牌多款型号”的窄句式会检查品牌遗漏。品牌不等于型号。规则不是通用实体识别或购买真实性证明。
+- `consumer_needs.specific_pain_points` 是痛点唯一明细；分类痛点列表和负面属性必须逐项对应，报告在统计前重新验证，不能独立编写另一份矛盾的痛点。
+- `explicit_needs` 只放消费者明确请求或其忠实概括；`potential_unmet_needs` 只放模型推断，并通过 `evidence_ids` 关联已验证事实。导航/障碍问题与 Reliability 故障类分开。
+- `quote` 必须逐字匹配原文。`raw_feedback` 的 `text` 必须等于原文；概括用 `evidence_summary`，新增解释或潜在需求用 `model_inference`。`uncertainty` 统一为 low/medium/high/insufficient_evidence 字符串，必须另有 `uncertainty_reason` 与验证步骤；推断不能标成低不确定性。
+
+本地 `.runtime/regression/first_qwen_response.json` 保存实际原始响应与单条评论，Git 忽略；其中 `reference_contract` 明确标注为人工回归期望，不是 Qwen 输出或市场证据，不生成报告。`tests/test_real_analysis_quality.py` 复现原始错误并检查严格拒绝边界；缺少私有资料时明确跳过，不自动获取真实数据。资料标注删除期限（采集后三十天），到期需删除或依法刷新后再用，不能作为永久公开 fixture。仅验证引用和约束不能证明模型的概括或商业推断在语义上正确，第二次实际输出仍需人工复核。
+
+`.runtime/second_qwen_request.pending.json` 仅准备第二次单条请求的候选配置、提示词摘要值及费用估算，状态为 awaiting_new_paid_confirmation。当前正式配置和首次预算账本保持原样，第一次的一次性机会已经消耗，不能借刷新再调用。只有取得新的明确付费确认后才激活第二次配置；仍是同一评论、一次请求、输出最多 1500 Token、无重试、不扩大样本。Token 估算和一元预算目标仍非账单硬保证。
+
+### Phase 3 首次真实实验（本机配置，待单独付费确认）
+
+操作者在本次对话确认正式批准覆盖真实评论 NLP、消费者需求、跨视频/频道汇总、Qwen 第三方处理及报告，并确认未设到期日。本机配置如实记录该确认来源；未提供批准编号或原件，不虚构编号、日期，也不声称程序已独立核验批准材料。示例配置仍默认关闭。
+
+本机仅开启 `single_request_estimate`：关键词 Robotic Pool Cleaner、产品改进研究、最近六个月视频；只允许所选真实评论 ID 及 SHA-256 对应的完整原文。最多一次请求、输出最多 1500 Token，不重试；未找到原评论或正文变化即停止，不替换为其他评论。一次实验使用固定预算账本身份，刷新或重新创建运行不会获得第二次请求机会；超时/失败也保留预留。
+
+输入 8000 Token 是采用完整消息 UTF-8 字节数加 4096 余量的估算阈值，并非服务端输入硬限制。按输入 0.8 元/百万、输出 2 元/百万预留 0.0094 元；一元仅为应用预算目标，不保证实际费用不超过它。`token_bound_verified` 保持 false；特殊单次模式基于操作者明确接受估算不确定性，不能用于批量分析。付费确认继续独立强制执行。评论原文和来源只留临时内存，不写本机配置；配置只含候选 ID 与原文摘要值。未经新的运行配置与付费确认，不扩大到十至四十条。
+
+## 自动研究入口（真实链路已接通，许可默认关闭）
+
+正式页面只需关键词、研究类型、时间范围和「开始研究」。没有上传控件，不要求 CSV/JSON，也不要求用户下载、编辑任何数据文件。
+后台复用官方单页搜索/评论读取，以内存 JSON 完成去重、来源绑定、质量/需求模型处理、洞察统计和两种专属报告展示。
+
+```sh
+source .venv/bin/activate
+python -B -m unittest discover -s Agent/tests -v
+python -B -m streamlit run Agent/web_app.py --server.address 127.0.0.1 --server.port 8501 --browser.gatherUsageStats false
+```
+
+打开 <http://127.0.0.1:8501>。旧服务若占用端口，先在它的终端按 Control+C，再重新启动。
+阅读本地数据使用说明后点击「开始研究」；没有有效服务端许可时，流程自动止于只读来源/评论预览，不读取 Qwen 密钥、不调用模型或生成真实分析报告。
+此时没有 AI 报告是预期行为，不是自动流程缺失。
+
+### 获取与分析分开控制（2026-11-05）
+
+搜索、评论读取、标准 JSON 转换、字段/来源校验及按视频展示不依赖 Qwen 的技术就绪状态、衍生分析许可记录或付费勾选。即使分析配置缺失、失效、技术开关关闭或未确认付费，点击「开始研究」仍可完成这些步骤，分析阶段则跳过。API 凭据、配额、网络和隐私同意仍是读取本身的条件。
+
+网页分别显示 YouTube 用途记录、Qwen 第三方处理确认、技术与预算状态；每轮付费确认是另外一个条件。`analysis_control.ANALYSIS_ENABLED` 只表示技术开关，不授予权限；`load_config` 只读取配置，`analysis_readiness` 分别检查条件，`Execution` 在每次模型/统计/报告执行时继续检查全部条件。审批配置、证明文件与批准状态没有因本次调整而改写。
+
+依据 [YouTube 衍生指标补充政策](https://developers.google.com/youtube/terms/derived-metrics-policy) 及 [官方合规说明](https://developers.google.com/youtube/terms/developer-policies-guide)，评论 NLP 属于补充条款列出的 Viewer Sentiment Analysis；申请并获批的用途和条款适用范围仍须覆盖实际产品研究。消费者需求、产品品牌比较并未因出现在本项目中就自动获批。`third_party_qwen` 是项目记录第三方处理范围/隐私披露与供应商条款的检查项，不声称 YouTube 提供一个名称为“Qwen 专项许可”的标准证书。跨频道汇总还涉及 [III.E.2](https://developers.google.com/youtube/terms/developer-policies)，公开用途需要按实际方案确认；按视频展示原始来源不能当作已获准发布跨频道衍生指标的证明。
+
+十五分钟内存期限、最多五视频/五十评论、固定模型和一元预算是本项目的运行选择，不是 YouTube 规定的统一技术上限。视频标题/评论正文仍适用官方刷新删除规则；本次未延长留存或开启持久化。
+
+取得覆盖实际用途的许可后，现有真实数据 → Qwen → 专属报告接口无需重写。但仍须独立完成 Token 上界验证、有效的供应商配置和每轮付费确认，才能执行；不能宣称“只填 approved=true 就能安全运行”。分析资格撤回或发生执行校验错误时保留原始采集预览，不显示被撤回的分析报告。
+
+### 受控执行与输出
+
+- `automatic_research.start_research` → 现有 `orchestrator.multi_video_research`（最多五视频/五十评论，无翻页）→ 内存 JSON → `real_pipeline.run_real_analysis` → 现有 `classify_qwen` 的受控分支 → `generate_insights` → `research_quality.render_live_specialist`。
+- 一个评论一次结构化 Qwen 请求，返回反馈类型、使用引句、品牌/型号及证据、旧情绪/属性字段、四类消费者需求与不确定性。使用同一传输、北京地域校验、Token 统计和错误处理，不添加模型 SDK。
+- 仅有逐字使用证据的 Actual Usage Experience 进入产品分析；咨询、一般讨论、内容反馈和不明确记录分开统计。unknown 不进入品牌比较。品牌和型号仅根据评论引句，不借视频标题猜测。
+- 结构/引句错误不补造、不降级为中性；首个模型失败或用量不明会停止后续派发，保留已成功记录，明确显示失败和未处理数量。数量/Token/金额上限到了也停止，不会自动调用剩余评论。
+- 报告复用研究目的、属性统计和来源一致性校验，但采用真实来源与实际模型 claims，不使用人工 Mock 编辑假设或 fixture。模型推断与原始表达分开；共同属性表不自动等于同条件品牌优势。
+- 评论、视频、模型响应和报告均不写磁盘、无下载按钮、无临时 CSV。来源含视频标题/ID/链接/发布时间、comment_id/review_id、原文、评论时间、采集时间。报告直接在页面展示。
+- 服务器内存结果十五分钟定时到期清除；活动页面每分钟检查并移除过期展示，不发 API 请求。改变输入、撤回同意、清除或服务端许可失效会清除相应结果。浏览器关闭并不等于立即清理；主动清除或停止服务可提前移除。
+
+### 服务端许可配置：管理员操作，不是终端用户上传
+
+`config/research_access.example.json` 保持默认未批准。本机 `config/research_access.json`（Git 忽略）已按 Phase 3 的操作者确认记录批准范围及“未设到期日”；只允许上文的单条估算实验，不包含密钥，也没有把未验证的 Token 上界改成已验证。
+
+取得适用确认后，由维护者核实并在本机配置真实记录：审批/项目/供应商条款引用、有效期、可处理来源范围、允许用途、固定模型、核实的价格和 Token 上界。
+配置文件不包含 API Key，且被 Git 忽略；原有 API Key 仍通过既有本地环境读取，不在前端输入/显示。
+权限检查覆盖批次入口、每次模型发送、统计和报告；没有许可、缺项、过期或执行中配置撤回/修改即拒绝，浏览器勾选不能授予平台权限。
+
+必需 scopes：`youtube_aggregation`、`feedback_nlp`、`consumer_needs`、`third_party_qwen`、`report_view`；竞品研究另需 `competitor_comparison`。
+当前自动搜索要求审批明确覆盖无关公开频道，因此 source_scope 必须对应 `public_videos_any_channel`。如果实际授权更窄，不可填这个值，应先实现对应范围过滤。
+provider_region 为 cn-beijing、raw_storage 为 memory_only；不要把服务商国际站条款当作当前北京账号已具备零留存的证据。
+这些配置是维护者对真实材料的记录，不是应用自动向平台验证出的许可证，更不能只改 approved=true 以绕过限制。
+
+### 付费确认和预算
+
+只有配置有效才显示付费确认，每次运行都要用户重新明确确认，然后主动开始。修改输入、价格/许可配置会撤销旧付费确认；刷新不派发请求。
+首次配置：最多四十次 Qwen 调用、每次输入 8000/输出 2000 Token、运行总预留 400000 Token、运行/UTC 每日累计金额各 1 元。每次按完整上限预留 0.0104 元，四十次累计预留 0.416 元；这是配置下的保守费用预留，不是实际用量或账单。
+
+2026-11-05 核对 [阿里云模型说明](https://help.aliyun.com/zh/model-studio/qwen-plus) 和 [官方原价](https://help.aliyun.com/zh/model-studio/model-pricing)：`qwen-plus` 当时对应 `qwen-plus-2025-12-01`。首次实验固定该快照，北京非思考、单次输入 ≤128000 Token，输入 0.8 元/百万、输出 2 元/百万，不扣免费额度或优惠。模型自身上下文为 1000000 Token、非思考最大输入 997952、最大输出 32768；应用采用远低于模型极限的 8000/2000 上限。
+
+请求使用 `enable_thinking=false`、`response_format={"type":"json_object"}`、`stream=false`。JSON 对象模式不保证业务 Schema；应用仍逐字段检查反馈类别、四字段分类、品牌/型号引用、四类需求、原文证据、推断标签及不确定性。资格识别与需求提取在同一次 Qwen 请求完成，报告只接纳有逐字使用引句的 Actual Usage Experience，不重复运行启发式分类。
+
+默认完整 endpoint 为 `https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions`；[官方兼容说明](https://help.aliyun.com/zh/model-studio/compatibility-of-openai-with-dashscope) 确认旧域名仍可用，并推荐业务空间专属北京域名。没有读取本地 `.env` 来检查覆盖值；实际执行时设置中的北京地址必须与服务端 `api_base_url` 完全匹配，否则在 HTTP 请求前拒绝。请求模型、非思考开关和输出上限也必须与预留配置一致；返回模型不一致、用量超过预留边界会停止。
+
+每次请求在发送前使用完整输入/输出 Token 上限预留最坏费用，超出任一上限不发送。UTF-8 字节数加模板开销作保守输入边界，仅在维护者验证该固定模型的 tokenizer/模板边界后可启用；原文太长则停止，不默默截断证据。
+当前 `token_bound_verified=false`、`token_bound_reference` 为空，未把该边界假设宣称为已验证。离线测试只能验证拒绝和预留逻辑，不能证明服务商 tokenizer 的实际计费上界。首次真实执行前需要记录该固定版本 tokenizer/聊天模板的验证依据；价格也应在执行前再次核对。程序硬性拒绝配置超过 1 元的运行/UTC 日预算及不匹配的价格。
+SQLite 账本在 `.runtime/research_budget.sqlite3`，仅保存日期、随机运行 ID、Token/费用预留，不保存评论、来源、密钥或模型文本，并被 Git 忽略。
+事务防止同一数据库下并发超支，跨刷新/新运行仍受 UTC 日累计金额上限约束。失败、超时、输出无效均不退预留，不自动重试、修复或再次生成报告。
+账本不会自动清零或删除；维护者不可在有待核对费用时删除它。实际账单仍以供应商为准；客户端预算依赖已核实价格和计费 Token 上界，不能代替服务商账户侧额度控制。
+
+旧 CSV Qwen 入口拒绝非合成数据；旧 YouTube CSV 批处理在落盘前拒绝；YouTube 统计/报告 JSON 入口必须有服务端执行权限。
+不允许用 CSV、临时 JSON 或去掉来源标记替代许可。开发者故意伪造 synthetic/审批配置不是受支持的使用方式。
+
+### 本轮验证与尚需解决的阻碍
+
+新增测试以现有合成文本及伪造服务响应在临时目录/内存验证真实形状的请求、Qwen 解析、来源、权限、预算、失败、两种报告和网页；没有新增市场样例或持久化 Mock 市场报告。
+真实执行尚需：平台对跨频道衍生分析/第三方处理/报告展示的适用确认，实际北京模型条款与有效期，以及固定模型的真实价格和保守 Token 边界配置；这些都未由代码测试代替。
+本轮没有发起真实付费请求，未验证真实模型的语义准确性。首次获准实验应先一条、人工复核引句/归属，再在预算内扩大到最多五十条；没有强行保证一定有五十条有效使用反馈。
+当前竞品报告保守输出共同属性覆盖与模型需求问题，不自动宣称可比场景、品牌胜负或商业机会规模。更可靠的场景归并/多语言语义质量需后续用获准数据核验。
+以下较早里程碑中的“只有合成入口／永久关闭”等描述为历史状态；当前默认仍关闭，但已存在以上受控真实执行路径。
+
 ## 报告质量优化：共享 41 条合成样例
 
 在已激活虚拟环境的仓库终端运行：
@@ -940,3 +1054,21 @@ python3 Agent/classify_reviews.py --mode qwen --limit 9
 | `outputs/.gitignore` | 忽略生成结果，避免意外提交 |
 | `validate_reviews.py`（沿用） | `load_reviews` 返回有效记录及校验统计 |
 | `README.md`（更新） | 本阶段运行、检查结果和排错说明 |
+
+### 真实数据获取核验与按视频预览
+
+网页结果按视频标题分组，显示该视频评论数、Video ID、视频发布时间和来源链接；超过 240 字符的评论可折叠查看。字段核验显示实际返回条数、有效标准 JSON 记录条数及异常字段，不进行情绪或需求分析。
+
+只读模式也自动转换为内部 JSON 可序列化记录，包含 `review_id`、`comment_id`、`video_id`、`video_title`、`video_url`、`video_published_at`、`review_text`、`source_platform`、`source_url`、`published_at`、`collected_at`、`brand`、`evidence_quality` 和 `is_synthetic`。仅保留在原有会话内存中，不写入文件。`brand=unknown`、`evidence_quality=not_assessed` 为预期状态，不表示字段丢失。
+
+最近 3/6/12 个月通过官方搜索请求的 `publishedAfter` 筛选**视频发布时间**。评论按 `order=time` 读取每视频最多十条顶层评论，不翻页、不额外按评论时间筛选，因此并非该时段评论的完整样本。
+
+当前没有有效服务端用途授权配置时，`start_research` 明确返回 `live-read-only`，不会进入已连接的 Qwen 和报告链路；授权配置也不会替代每轮付费确认。来源字段校验失败时禁止启动分析。缺失、重复、错误时间和评论/视频归属不一致会列为异常，不伪造修补数据。
+
+在仓库根目录运行离线测试：
+
+```bash
+python -B -m unittest discover -s Agent/tests
+```
+
+保持原有本地 Streamlit 启动方式。已有结果仍在会话内且未过期时，网页重新运行即可显示分组和字段核验，不会因此重新请求 API；十五分钟内存期限及清除结果机制保持不变。不要为应用本次界面调整再次点击“开始研究”，除非需要主动重新获取。

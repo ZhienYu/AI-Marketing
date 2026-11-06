@@ -20,8 +20,8 @@ def markdown(value):
     return re.sub(r"([\\`*\[\]()|#])", r"\\\1", text)
 
 
-def render_report(insights, classified, reviews, dataset="test"):
-    computed = generate_insights(classified)
+def render_report(insights, classified, reviews, dataset="test", *, execution=None):
+    computed = generate_insights(classified, execution=execution)
     if computed != insights:
         raise ClassificationError("Insights do not match classifications; regenerate matching insights first.")
     results = classified["results"]

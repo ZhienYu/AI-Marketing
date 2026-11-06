@@ -250,3 +250,183 @@ def run_expanded(purpose="both", *, output_root=None):
         save_report(path, render_research_report(name, research, classified, reviews))
         paths.append(path)
     return paths
+
+
+def render_live_specialist(state, *, execution=None):
+    """Use the existing two research purposes with actual validated model claims.
+
+    Does not call an LLM or persist content. Unlike synthetic editorial templates,
+    it cannot supply hypotheses from EDITORIAL or manually annotated fixtures.
+    """
+    from consumer_needs import PURPOSES
+    from real_analysis_schema import NEED_FIELDS, VERSION, compatibility_view, process_analysis
+    from evidence_analysis import VERSION as EVIDENCE_VERSION, process_evidence_analysis
+    from generate_insights import generate_insights
+    from generate_report import render_report
+    from analysis_control import Execution, ControlError
+    if not isinstance(execution, Execution):
+        raise ControlError("A server-side execution is required before rendering real derived results.")
+    policy = execution.check()
+    purpose = state["purpose"]
+    if purpose not in PURPOSES:
+        raise ClassificationError("Unsupported purpose.")
+    eligible = []
+    processed = []
+    excluded = 0
+    model_contracts = {version for version in (state.get("schema_version"), policy.get("analysis_schema_version"))
+                       if version in (VERSION, EVIDENCE_VERSION)}
+    for row in state["results"]:
+        raw = row["processing"]["raw"] if "processing" in row else row["analysis"]
+        processor = process_evidence_analysis if isinstance(raw, dict) and raw.get("schema_version") == EVIDENCE_VERSION else process_analysis
+        if isinstance(raw, dict) and raw.get("schema_version") in (VERSION, EVIDENCE_VERSION):
+            model_contracts.add(raw["schema_version"])
+        quality = processor(raw, row)
+        if quality["status"] == "Invalid" or quality["normalized"] != row["analysis"]:
+            raise ClassificationError("Report requires validated analysis matching the original response.")
+        view = compatibility_view(quality["normalized"], row, allow_incomplete=True,
+                                  evidence_projection=processor is process_evidence_analysis)
+        if row["brand"] != view["brand"]["name"]:
+            raise ClassificationError("Report brand disagrees with validated model attribution.")
+        if row["source_platform"] != "youtube" or row["is_synthetic"] is not False:
+            raise ClassificationError("Real report requires real provenance.")
+        if quality["status"] == "Excluded":
+            excluded += 1
+            continue
+        row = {**row, "analysis": view, "quality": quality}
+        processed.append(row)
+        if "Actual Usage Experience" in row["analysis"]["feedback_types"] and row["analysis"]["usage_quote"]:
+            eligible.append(row)
+    def statistics_row(row):
+        classification = row["analysis"]["classification"]
+        pending = {issue["fact_id"] for issue in row["quality"]["issues"] if issue["code"] == "semantic_review_required"}
+        if pending:
+            wire = row["quality"]["normalized"]
+            disputed = {fact["summary"] for fact in wire["facts"] if fact["id"] in pending}
+            positive = [p for p in classification["positive_aspects"] if p not in disputed]
+            negative = [p for p in classification["pain_points"] if p not in disputed]
+            if not positive and not negative:
+                return None
+            classification = {**classification, "positive_aspects": positive, "pain_points": negative,
+                              "sentiment": "Mixed" if positive and negative else "Positive" if positive else "Negative" if negative else "Neutral",
+                              "product_aspects": [a for a in classification["product_aspects"] if a["feedback"] not in disputed]}
+        return {**{k: row[k] for k in ("review_id", "brand", "source_platform", "source_url", "is_synthetic")}, **classification}
+    classified = {"mode": "qwen", "model": state["model"], "failures": state["failures"],
+                  "results": [item for row in eligible if (item := statistics_row(row)) is not None]}
+    insights = generate_insights(classified, execution=execution)
+    if classified["results"]:
+        render_report(insights, classified, eligible, dataset="real", execution=execution)  # reuse source/aggregate consistency validation
+    refs = {row["review_id"]: f"E{i:02d}" for i, row in enumerate(eligible, 1)}
+    cite = lambda row: f"[{refs[row['review_id']]}](#{refs[row['review_id']].lower()})"
+    categories = Counter(label for row in processed for label in row["analysis"]["feedback_types"])
+    lines = ["# " + PURPOSES[purpose], "", "> REAL YOUTUBE SAMPLE · Agent 独立模型分析，非 YouTube 官方指标。", "", "## Executive Summary", "",
+        f"采集 {state['collected']} 条；可用分析 {len(processed)} 条；Excluded {excluded} 条；有效自述使用反馈 {len(eligible)} 条；失败 {len(state['failures'])} 条；未处理 {state['unprocessed']} 条。状态：{md(state['status'])}。",
+        "仅分析实际处理的样本，未处理/失败不能视为中性。自述不等于验证购买，样本不代表市场。"]
+    if state["collected"] == 1:
+        lines.insert(2, "> 单样本技术验收预览 · Insufficient Evidence")
+    partial = [row for row in processed if row["quality"]["status"] == "Partial"]
+    if partial:
+        lines += ["", "### Incomplete Analysis（Partial）", "以下仅展示已有证据支持的发现。遗漏项不计为已提取需求。"]
+        labels = {"missing_purchase_inquiry": "购买咨询遗漏", "missing_explicit_need": "明确需求遗漏",
+                  "semantic_review_required": "概括待人工核验，展示原文证据",
+                  "relevance_unconfirmed": "相关性不明确，未纳入产品体验统计",
+                  "unsupported_frequency": "原概括的频率描述缺乏证据，展示原文片段"}
+        for row in partial:
+            for issue in row["quality"]["issues"]:
+                evidence = issue.get("source_quote", issue.get("term", ""))
+                lines.append(f"- {md(row['review_id'])} · {labels[issue['code']]} · {md(evidence)}")
+    negative = []
+    for row in eligible:
+        for pain in row["analysis"]["consumer_needs"]["specific_pain_points"]:
+            if any(issue["code"] == "semantic_review_required" and issue["fact_id"] == pain["claim_id"] for issue in row["quality"]["issues"]):
+                continue
+            negative.append((pain["aspect"], row))
+    counts = {a: {r["review_id"] for aspect, r in negative if aspect == a} for a, _ in negative}
+    for aspect in sorted(counts, key=lambda a: -len(counts[a]))[:3]:
+        examples = [r for r in eligible if r["review_id"] in counts[aspect]]
+        lines += [f"- **样本线索：{md(aspect)}** 有 {len(counts[aspect])} 条负面提及。" + ", ".join(cite(r) for r in examples)]
+    if not counts:
+        lines += ["Insufficient Evidence：未取得有支持的使用痛点，不生成商业机会结论。"]
+    lines += ["", "## 研究建议", "", "先核验原文与使用目标，再复现场景并访谈需求重要性。以下模型假设不证明商业价值、销量或 ROI。"]
+    if purpose == "improvement":
+        lines += ["", "## 场景 → 痛点 → 需求 → 改进与验证", ""]
+        for row in eligible:
+            claims = row["analysis"]["consumer_needs"]
+            if not any(claims.values()):
+                continue
+            lines += ["### " + cite(row) + " · " + md(row["brand"]), ""]
+            for field, label in zip(NEED_FIELDS, ("使用场景", "具体痛点", "明确需求", "潜在未满足需求", "潜在改进方向")):
+                for claim in claims[field]:
+                    if any(issue.get("fact_id") == claim["claim_id"] for issue in row["quality"]["issues"]):
+                        lines.extend(f"- **{label} / 原文证据** {md(quote)}" for quote in claim["quotes"])
+                        continue
+                    kind = {"raw_feedback": "明确原始表达", "evidence_summary": "原始反馈概括", "model_inference": "Qwen 模型推断（待验证）"}[claim["claim_type"]]
+                    details = f"；不确定性：{md(claim['uncertainty'])}；建议验证：{md(claim['validation_step'])}" if claim["claim_type"] == "model_inference" else ""
+                    lines += [f"- **{label} / {kind}：** {md(claim['text'])}{details}。"]
+            lines += ["单条反馈仅支持探索性假设，Insufficient Evidence，不应直接包装为可靠商业机会。", ""]
+    else:
+        brands = {b: d for b, d in insights["brands"].items() if d["sample_size"]}
+        lines += ["", "## 品牌覆盖与相同功能维度", "", "| 品牌 | 样本 | 限制 |", "|---|---:|---|"]
+        for brand, data in brands.items():
+            lines.append(f"| {md(brand)} | {data['sample_size']} | Insufficient Data：非受控样本 |")
+        lines += ["", f"unknown 品牌 {insights['unknown_brand_records']} 条，不进入品牌比较。", ""]
+        if len(brands) < 2:
+            lines += ["无法进行可靠竞品比较：不足两个有证据归属的品牌。保留研究问题：能否取得多品牌相同场景反馈？"]
+        else:
+            lines += ["| 同一属性 | " + " | ".join(md(b) for b in brands) + " |", "|---|" + "---|" * len(brands)]
+            for item in insights["comparison_table"]:
+                if not any(item["brands"][b][s] for b in brands for s in ("Positive", "Negative", "Neutral")):
+                    continue
+                cells = [f"{item['brands'][b]['Positive']} / {item['brands'][b]['Negative']}" for b in brands]
+                lines.append("| " + md(item["aspect"]) + " | " + " | ".join(cells) + " |")
+            lines += ["每格为正面/负面独立评论数，零提及不代表满意。以上仅为共同属性覆盖，尚未验证共同使用条件，不输出品牌优劣或排名。"]
+        lines += ["", "## 需求与潜在差异化研究问题", ""]
+        for row in eligible:
+            for field in ("explicit_needs", "potential_unmet_needs"):
+                for claim in row["analysis"]["consumer_needs"][field]:
+                    if any(issue.get("fact_id") == claim["claim_id"] for issue in row["quality"]["issues"]):
+                        lines.extend(f"- {cite(row)} 原文证据：{md(quote)}" for quote in claim["quotes"])
+                        continue
+                    label = "Qwen 模型假设" if claim["claim_type"] == "model_inference" else "明确需求"
+                    details = f"；不确定性：{md(claim['uncertainty'])}；建议验证：{md(claim['validation_step'])}" if claim["claim_type"] == "model_inference" else ""
+                    lines.append(f"- {cite(row)} {md(row['brand'])} · {label}：{md(claim['text'])}{details}。")
+        lines += ["同一需求是否跨品牌出现、不同场景是否可比，需进一步核验；没有证据时不生成差异化机会。"]
+    lines += ["", "## Evidence Appendix", "", "### Sources & Methodology", "",
+        f"运行 {md(state['run_id'])}；模型 {md(state['model'])}；运行时间 UTC {md(state['collected_at'])}。",
+        "通过官方 API 取得的一页近期样本，不是完整评论历史或持续实时监控。评论完整原文留于本次会话内存，没有写入报告文件。",
+        "每评论同属性同情绪只计一次。仅明确自述使用记录进入产品分析；咨询、视频反馈、讨论及不明确记录分别保留。模型引用经逐字匹配，不保证语义推断正确。品牌仅来自原文引句，不由视频标题猜测。",
+        "反馈类别（多标签，数量不可相加当作评论数）：" + md(dict(categories)), "模型响应契约：" + (", ".join(sorted(model_contracts)) or "未记录"),
+        "内部证据投影：" + VERSION, "报告展示版本：research-report-1", ""]
+    for row in eligible:
+        lines += [f"<a id=\"{refs[row['review_id']].lower()}\"></a>", "### " + refs[row["review_id"]],
+            "", "**原文：** " + md(row["review_text"]), "",
+            "**来源链接：** [YouTube 评论](" + row["source_url"] + ")",
+            "**视频：** " + md(row["video_title"]) + " · " + md(row["video_id"]),
+            "**视频发布时间：** " + md(row["video_published_at"]),
+            "**评论：** " + md(row["comment_id"]) + " · 发布时间 " + md(row["published_at"]),
+            "**采集时间：** " + md(row["collected_at"]),
+            "**品牌 / 型号及引句：** " + md(row["analysis"]["brand"]) + " / " + md(row["analysis"]["product_model"]), ""]
+        for field in NEED_FIELDS:
+            for claim in row["analysis"]["consumer_needs"][field]:
+                for quote in claim["quotes"]:
+                    lines += ["- " + md(claim["claim_id"]) + " 独立原文片段：" + md(quote) + "；来源类型：" + md(claim["claim_type"]) + "；支持证据：" + md(claim["evidence_ids"])]
+        used = set()
+        for link in row["quality"].get("evidence_links", []):
+            ids = link["evidence_ids"]
+            if ids:
+                used.update(ids)
+                field = link["path"][0]
+                if field == "facts":
+                    field = row["quality"]["normalized"]["facts"][link["path"][1]]["id"]
+                elif field == "potential_needs":
+                    field = f"potential-{link['path'][1] + 1}"
+                elif field == "feedback_types":
+                    field = row["quality"]["raw"]["feedback_types"][link["path"][1]]["type"]
+                lines.append(f"- {md(field)} → {', '.join(ids)}")
+        for span in row["quality"].get("evidence_spans", []):
+            if span["id"] in used:
+                fence = "`" * (max((len(run) for run in re.findall(r"`+", span["text"])), default=2) + 1)
+                lines += ["", f"**{span['id']} · 原文字符范围 [{span['start']}, {span['end']})**",
+                          fence, span["text"], fence, ""]
+    if state["failures"]:
+        lines += ["", "### 失败记录", *["- " + md(f["review_id"]) + "：" + md(f["reason"]) for f in state["failures"]]]
+    return "\n".join(lines) + "\n"

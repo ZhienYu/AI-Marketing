@@ -36,7 +36,7 @@ def video_cutoff(months, now=None):
     return now.replace(year=year, month=month, day=min(now.day, calendar.monthrange(year, month)[1])).isoformat().replace("+00:00", "Z")
 
 
-def multi_video_research(query, *, months=6, live=False):
+def multi_video_research(query, *, months=6, live=False, progress=None):
     """Bounded, sequential official API reads only; never NLP or persistence."""
     if live is not True:
         raise ValueError("Multi-video reads require explicit live=True.")
@@ -51,6 +51,8 @@ def multi_video_research(query, *, months=6, live=False):
     seen_videos, seen_comments = set(), set()
     stop = False
     for video in videos:
+        if progress:
+            progress("collecting", len(result["videos"]), len(videos))
         if video["video_id"] in seen_videos:
             continue
         seen_videos.add(video["video_id"])

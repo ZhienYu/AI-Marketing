@@ -1,14 +1,11 @@
-"""Read-only evidence envelope and a closed interface for future approved analysis.
-
-No NLP, credential loading, model calls, persistence, or approval switch lives here.
-"""
+"""Read-only evidence envelope and server-policy-gated real analysis entrypoint."""
 
 from youtube_comments import preview_text
 
 
 ANALYSIS_BLOCK_REASON = (
-    "真实评论分析尚未启用：未取得覆盖跨视频产品研究、评论 NLP、跨品牌比较及阿里云百炼第三方处理的适用许可。"
-    "目前仅可搜索、选片和预览；不运行反馈筛选、Qwen、派生统计或报告。"
+    "真实分析需要独立通过用途授权、Qwen 第三方处理、技术/预算和本轮付费确认，不能由输入数据或 API Key 代替。"
+    "搜索、标准 JSON 转换、字段校验及原始预览不依赖这些分析条件。"
 )
 
 
@@ -17,17 +14,29 @@ class AnalysisNotAuthorized(RuntimeError):
 
 
 def analysis_status():
-    return {"enabled": False, "code": "youtube_analysis_not_authorized", "reason": ANALYSIS_BLOCK_REASON}
+    from analysis_control import load_config, analysis_readiness
+    controls = analysis_readiness(load_config(), "improvement")
+    reasons = [controls[k]["reason"] for k in ("youtube", "provider", "technical") if not controls[k]["ready"]]
+    return {"enabled": controls["ready"], "code": "ready" if controls["ready"] else "analysis_not_ready",
+            "reason": "仍需本次付费确认。" if controls["ready"] else " ".join(reasons), "controls": controls}
 
 
-def run_real_analysis(records, *, model="qwen-plus", max_reviews=10):
-    """Future coordination interface; deliberately unavailable in this release.
+def run_real_analysis(records, *, model="qwen-plus", max_reviews=10, execution=None, progress=None):
+    """Reject before reading data unless a server-owned approved execution exists.
 
-    Even direct calls fail before inspecting records. An API key, browser
-    checkbox, environment flag, or an approved-looking input cannot enable it.
-    See docs/REAL_DATA_PIPELINE.md for the reviewed implementation plan.
+    Browser input, a credential or an approved-looking record is not a permit.
+    The automatic coordinator supplies the policy/paid-confirmed budget context.
     """
-    raise AnalysisNotAuthorized(ANALYSIS_BLOCK_REASON)
+    if execution is None:
+        raise AnalysisNotAuthorized(ANALYSIS_BLOCK_REASON)
+    from analysis_control import Execution
+    if not isinstance(execution, Execution):
+        raise AnalysisNotAuthorized(ANALYSIS_BLOCK_REASON)
+    limits = execution.check()
+    if model != limits["model"] or max_reviews != limits["max_calls"]:
+        raise AnalysisNotAuthorized("Execution parameters must match the approved server limits.")
+    from automatic_research import analyze_records
+    return analyze_records(records, execution, progress=progress)
 
 
 def build_read_only_preview(preview):
