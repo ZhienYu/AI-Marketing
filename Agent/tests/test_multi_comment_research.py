@@ -110,7 +110,8 @@ class MultiCommentTests(unittest.TestCase):
         self.assertIn("使用寿命与耐用性** · 产品反馈／购买考虑 · 2 条独立评论", report)
         self.assertIn("待验证研究方向 · 使用寿命与耐用性", report)
         self.assertNotIn("Your review was very helpful", report)
-        experience, purchase = report.split("## Purchase Considerations", 1)
+        _, detail = report.split("## Product Experience", 1)
+        experience, purchase = detail.split("## Purchase Considerations", 1)
         self.assertNotIn("paid subscription", experience)
         self.assertIn("paid subscription", purchase)
 

@@ -13,6 +13,7 @@ from analysis_control import (
     BATCH_MAX_CALLS, BATCH_MAX_COMMENTS, BATCH_SIZE, ControlError, Execution, message_token_estimate,
 )
 import classify_reviews as classifier
+from commercial_insights import VALIDATION, render_competitors, source_links
 from evidence_analysis import (
     NEGATIVE_CUE, REQUEST_CUE, PROMPT, VERSION, evidence_message, evidence_spans, process_evidence_analysis,
     supports_purchase_inquiry,
@@ -417,23 +418,15 @@ def group_themes(state, formal, *, focus=()):
                     continue
                 section, label = "needs", "明确期待" if claim["status"] == "Supported" else "期待线索，待复核"
                 topics = topics or ["其他明确期待线索"]
-            elif field == "feedback_types" and item["type"] == "Product Discussion" and "型号选择与比较" in topics:
-                section, label = "comparison", "有来源的产品比较，归属待核"
-                topics = ["型号选择与比较"]
             elif field == "potential_needs" and not source_only and claim["status"] == "Supported":
                 section, label = "opportunities", "Qwen 待验证假设"
                 topics = topics or ["其他改进假设"]
             else:
                 continue
-            if focus and section not in {"comparison", "purchase"} and topics != ["电池健康度"]:
+            if focus and section != "purchase" and topics != ["电池健康度"]:
                 topics = matching_focus(focus, source)
             if source_only:
-                if section == "comparison":
-                    continue
                 label = "原文待复核 · 品牌／型号归属未确认"
-            if not source_only and section == "purchase" and "型号选择与比较" in topics:
-                groups["comparison"]["型号选择与比较"].append((row, label, ids, [spans[ident] for ident in ids], item))
-                topics = [topic for topic in topics if topic != "型号选择与比较"]
             for topic in topics:
                 groups[section][topic].append((row, label, ids, [spans[ident] for ident in ids], item))
     # A direct, concrete wish can be read from the source even if the model
@@ -465,7 +458,7 @@ def render_consumer_report(query, state, formal):
         formal_count = len(formal)
     contributing = lambda entries: len({row["review_id"] for row, *_ in entries})
     overview = defaultdict(list)
-    section_names = {"experience": "产品反馈", "purchase": "购买考虑", "needs": "明确期待", "comparison": "竞品讨论"}
+    section_names = {"experience": "产品反馈", "purchase": "购买考虑", "needs": "明确期待", "preferences": "一般偏好"}
     topic_sections = defaultdict(list)
     for section in section_names:
         for topic, entries in groups.get(section, {}).items():
@@ -483,28 +476,43 @@ def render_consumer_report(query, state, formal):
         lines += ["研究主题：" + "、".join(focus) + "。", ""]
         if state["selected"] < BATCH_MAX_COMMENTS:
             lines += ["本轮样本少于 10 条。具体筛选与批次限制可在技术详情核对。", ""]
+    lines += ["## Consumer Insights", ""]
     if ranked:
         for topic in ranked[:3]:
             label = "／".join(topic_sections[topic])
-            lines.append(f"- **{md(topic)}** · {label} · {contributing(overview[topic])} 条独立评论。")
+            count, links = source_links(overview[topic])
+            detail = "；".join(f"{name} {contributing(groups[section][topic])} 条"
+                               for section, name in section_names.items() if topic in groups[section])
+            qualifier = " · 多条评论共同提到" if count >= 2 else " · 单条线索"
+            lines.append(f"- **{md(topic)}** · {label} · {count} 条独立评论{qualifier}。{detail}。{links}")
+        lines += ["", "同一评论可贡献多类反馈，各类计数不可相加。"]
     else:
         lines.append("当前没有可安全归纳的具体主题。分节保留有来源的单条线索。")
-    sections = (("experience", "Product Experience"), ("purchase", "Purchase Considerations"),
-                ("needs", "Consumer Needs"), ("preferences", "General Preferences & Criteria"),
-                ("comparison", "Competitive Discussion"),
-                ("opportunities", "Product Improvement Opportunities"))
+    sections = (("comparison", "Competitive Discussion"), ("opportunities", "Product Improvement Opportunities"),
+                ("experience", "Product Experience"), ("purchase", "Purchase Considerations"),
+                ("needs", "Consumer Needs"), ("preferences", "General Preferences & Criteria"))
     for section, heading in sections:
         lines += ["", "## " + heading, ""]
+        if section == "comparison":
+            lines.extend(render_competitors(state, focus, lambda source: (
+                MEDIA_ONLY.fullmatch(source) or CONTENT_OR_IMAGINED.search(source) or VIDEO_LINK.search(source)
+                or (LINK.search(source) and PROMOTION.search(source))
+            )))
+            continue
         themes = groups.get(section, {})
         directions = []
         if section == "opportunities":
             for topic in sorted(set(groups["needs"]) | set(groups["purchase"])):
                 evidence = groups["needs"].get(topic, []) + groups["purchase"].get(topic, [])
+                if topic in VALIDATION:
+                    evidence += groups["experience"].get(topic, [])
                 axes = {}
                 for entry in evidence:
                     measures = research_axes(" ".join(entry[3]))
                     if measures:
-                        axes.setdefault("与".join(measures), []).append(entry)
+                        axes.setdefault(tuple(measures), []).append(entry)
+                    elif topic in VALIDATION:
+                        axes.setdefault((topic,), []).append(entry)
                 if axes:
                     directions.append((topic, axes))
         recurring = [topic for topic in ranked if contributing(overview[topic]) >= 2 and
@@ -512,16 +520,23 @@ def render_consumer_report(query, state, formal):
         if not themes and not recurring and not directions:
             lines.append("当前证据不足。")
         for topic, axes in directions[:3]:
-            for axis, entries in axes.items():
-                links = {row["review_id"]: row["source_url"] for row, *_ in entries}
-                sources = "、".join(f"[评论 {index}]({url})" for index, url in enumerate(list(links.values())[:3], 1))
-                lines.append(f"- **待验证研究方向 · {md(topic)}**：按型号与使用场景核对**{md(axis)}**。"
-                             f"线索来自 {len(links)} 条评论（{sources}）。")
+            for measures, entries in axes.items():
+                count, links = source_links(entries)
+                directions_and_checks = [VALIDATION[measure] for measure in measures]
+                suggestions, checks = zip(*directions_and_checks)
+                title = topic if measures == (topic,) else topic + " · " + "与".join(measures)
+                lines.append(f"- **待验证研究方向 · {md(title)}**。"
+                             f"依据 {count} 条独立评论（{links}）。")
+                for _, _, _, quotes, _ in entries[:2]:
+                    lines.append("  - 消费者原文 " + " / ".join(f"「{md(quote.strip())}」" for quote in quotes))
+                lines.append(f"  - **建议（待验证）** {'；'.join(suggestions)}。")
+                lines.append(f"  - **验证方法** {'；'.join(checks)}。")
         for topic in recurring:
-            links = {row["review_id"]: row["source_url"] for row, *_ in overview[topic]}
-            sources = "、".join(f"[评论 {index}]({url})" for index, url in enumerate(list(links.values())[:3], 1))
-            lines.append(f"- **待验证研究方向 · {md(topic)}**：在访谈中确认它是否影响选购或持续使用，"
-                         f"并按型号分别核对。线索来自 {len(links)} 条评论（{sources}）。")
+            count, links = source_links(overview[topic])
+            suggestion, check = VALIDATION.get(topic, ("核对该关注点是否值得改进",
+                "按型号分组，用来源里的使用或选购场景核实，再观察它是否改变用户选择"))
+            lines.append(f"- **待验证研究方向 · {md(topic)}**。线索来自 {count} 条独立评论（{links}）。"
+                         f"**建议（待验证）** {suggestion}。**验证方法** {check}。")
         for topic, entries in sorted(themes.items(), key=lambda item: (-contributing(item[1]), item[0])):
             lines += [f"### {md(topic)} · {contributing(entries)} 条独立评论", ""]
             seen = set()
@@ -543,7 +558,8 @@ def render_consumer_report(query, state, formal):
     lines += ["", "## Evidence & Limitations", "",
               "每个主题按去重后的评论 ID 计数。同一评论可涉及多个主题，主题数量不可相加。不同评论也无法证明来自不同消费者。",
               "筛选优先考虑产品相关线索及视频覆盖。采集取自近期发布视频的单页公开顶层评论，结果反映本次便利样本。",
-              "本人自述、直接期待、一般标准和假设分开呈现。自述未经独立核实，原文期待未进入正式统计；待验证方向不代表需求普遍性。"]
+              "本人自述、直接期待、一般标准和假设分开呈现。自述未经独立核实，原文期待未进入正式统计；待验证方向不代表需求普遍性。",
+              "商业建议由报告规则依据引用生成。模型提出的假设另行标注。"]
     if excluded or state["failures"] or state["unprocessed"]:
         outcomes = state.get("outcomes", {})
         request_failures = sum(value == "请求失败，费用未知" for value in outcomes.values())
