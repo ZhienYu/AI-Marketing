@@ -260,7 +260,7 @@ def render_live_specialist(state, *, execution=None):
     """
     from consumer_needs import PURPOSES
     from real_analysis_schema import NEED_FIELDS, VERSION, compatibility_view, process_analysis
-    from evidence_analysis import VERSION as EVIDENCE_VERSION, process_evidence_analysis
+    from evidence_analysis import VERSION as EVIDENCE_VERSION, evidence_spans, process_evidence_analysis
     from generate_insights import generate_insights
     from generate_report import render_report
     from analysis_control import Execution, ControlError
@@ -296,9 +296,18 @@ def render_live_specialist(state, *, execution=None):
         processed.append(row)
         if "Actual Usage Experience" in row["analysis"]["feedback_types"] and row["analysis"]["usage_quote"]:
             eligible.append(row)
+    def unverified_facts(row):
+        return {issue["fact_id"] for issue in row["quality"]["issues"] if "fact_id" in issue}
+
+    def claim_requires_review(row, claim):
+        unverified = unverified_facts(row)
+        return claim["claim_id"] in unverified or (
+            claim["claim_type"] == "model_inference" and bool(unverified.intersection(claim["evidence_ids"]))
+        )
+
     def statistics_row(row):
         classification = row["analysis"]["classification"]
-        pending = {issue["fact_id"] for issue in row["quality"]["issues"] if issue["code"] == "semantic_review_required"}
+        pending = unverified_facts(row)
         if pending:
             wire = row["quality"]["normalized"]
             disputed = {fact["summary"] for fact in wire["facts"] if fact["id"] in pending}
@@ -312,14 +321,15 @@ def render_live_specialist(state, *, execution=None):
         return {**{k: row[k] for k in ("review_id", "brand", "source_platform", "source_url", "is_synthetic")}, **classification}
     classified = {"mode": "qwen", "model": state["model"], "failures": state["failures"],
                   "results": [item for row in eligible if (item := statistics_row(row)) is not None]}
-    insights = generate_insights(classified, execution=execution)
+    dynamic_aspects = EVIDENCE_VERSION in model_contracts
+    insights = generate_insights(classified, execution=execution, dynamic_aspects=dynamic_aspects)
     if classified["results"]:
-        render_report(insights, classified, eligible, dataset="real", execution=execution)  # reuse source/aggregate consistency validation
+        render_report(insights, classified, eligible, dataset="real", execution=execution, dynamic_aspects=dynamic_aspects)  # reuse source/aggregate consistency validation
     refs = {row["review_id"]: f"E{i:02d}" for i, row in enumerate(eligible, 1)}
     cite = lambda row: f"[{refs[row['review_id']]}](#{refs[row['review_id']].lower()})"
     categories = Counter(label for row in processed for label in row["analysis"]["feedback_types"])
     lines = ["# " + PURPOSES[purpose], "", "> REAL YOUTUBE SAMPLE · Agent 独立模型分析，非 YouTube 官方指标。", "", "## Executive Summary", "",
-        f"采集 {state['collected']} 条；可用分析 {len(processed)} 条；Excluded {excluded} 条；有效自述使用反馈 {len(eligible)} 条；失败 {len(state['failures'])} 条；未处理 {state['unprocessed']} 条。状态：{md(state['status'])}。",
+        f"提交分析 {state['collected']} 条；可用分析 {len(processed)} 条；Excluded {excluded} 条；有效自述使用反馈 {len(eligible)} 条；进入属性统计 {len(classified['results'])} 条；失败 {len(state['failures'])} 条；未处理 {state['unprocessed']} 条。状态：{md(state['status'])}。",
         "仅分析实际处理的样本，未处理/失败不能视为中性。自述不等于验证购买，样本不代表市场。"]
     if state["collected"] == 1:
         lines.insert(2, "> 单样本技术验收预览 · Insufficient Evidence")
@@ -332,12 +342,12 @@ def render_live_specialist(state, *, execution=None):
                   "unsupported_frequency": "原概括的频率描述缺乏证据，展示原文片段"}
         for row in partial:
             for issue in row["quality"]["issues"]:
-                evidence = issue.get("source_quote", issue.get("term", ""))
-                lines.append(f"- {md(row['review_id'])} · {labels[issue['code']]} · {md(evidence)}")
+                evidence = issue.get("source_quote", issue.get("fact_id", issue.get("term", "")))
+                lines.append(f"- {md(row['review_id'])} · {labels.get(issue['code'], issue.get('reason', issue['code']))} · {md(evidence)}")
     negative = []
     for row in eligible:
         for pain in row["analysis"]["consumer_needs"]["specific_pain_points"]:
-            if any(issue["code"] == "semantic_review_required" and issue["fact_id"] == pain["claim_id"] for issue in row["quality"]["issues"]):
+            if claim_requires_review(row, pain):
                 continue
             negative.append((pain["aspect"], row))
     counts = {a: {r["review_id"] for aspect, r in negative if aspect == a} for a, _ in negative}
@@ -356,8 +366,8 @@ def render_live_specialist(state, *, execution=None):
             lines += ["### " + cite(row) + " · " + md(row["brand"]), ""]
             for field, label in zip(NEED_FIELDS, ("使用场景", "具体痛点", "明确需求", "潜在未满足需求", "潜在改进方向")):
                 for claim in claims[field]:
-                    if any(issue.get("fact_id") == claim["claim_id"] for issue in row["quality"]["issues"]):
-                        lines.extend(f"- **{label} / 原文证据** {md(quote)}" for quote in claim["quotes"])
+                    if claim_requires_review(row, claim):
+                        lines.extend(f"- **{label}待复核 / 仅展示原文** {md(quote)}" for quote in claim["quotes"])
                         continue
                     kind = {"raw_feedback": "明确原始表达", "evidence_summary": "原始反馈概括", "model_inference": "Qwen 模型推断（待验证）"}[claim["claim_type"]]
                     details = f"；不确定性：{md(claim['uncertainty'])}；建议验证：{md(claim['validation_step'])}" if claim["claim_type"] == "model_inference" else ""
@@ -383,13 +393,56 @@ def render_live_specialist(state, *, execution=None):
         for row in eligible:
             for field in ("explicit_needs", "potential_unmet_needs"):
                 for claim in row["analysis"]["consumer_needs"][field]:
-                    if any(issue.get("fact_id") == claim["claim_id"] for issue in row["quality"]["issues"]):
-                        lines.extend(f"- {cite(row)} 原文证据：{md(quote)}" for quote in claim["quotes"])
+                    if claim_requires_review(row, claim):
+                        lines.extend(f"- {cite(row)} 待复核原文：{md(quote)}" for quote in claim["quotes"])
                         continue
                     label = "Qwen 模型假设" if claim["claim_type"] == "model_inference" else "明确需求"
                     details = f"；不确定性：{md(claim['uncertainty'])}；建议验证：{md(claim['validation_step'])}" if claim["claim_type"] == "model_inference" else ""
                     lines.append(f"- {cite(row)} {md(row['brand'])} · {label}：{md(claim['text'])}{details}。")
         lines += ["同一需求是否跨品牌出现、不同场景是否可比，需进一步核验；没有证据时不生成差异化机会。"]
+    lines += ["", "## 探索性消费者观察", "",
+              "购买咨询、价格顾虑和明确期望可提供后续研究线索。本节不进入使用属性统计，不代表市场趋势。"]
+    observations = []
+    labels = {"positive_feedback": "正面体验线索", "pain_point": "问题线索", "explicit_need": "明确期望", "usage_scenario": "使用情境"}
+    for row in processed:
+        spans = {span["id"]: span["text"] for span in row["quality"].get("evidence_spans", [])}
+        raw = row["quality"]["raw"]
+        if not spans:
+            continue
+        for claim in row["quality"]["claim_quality"]:
+            field, *position = claim["path"]
+            if not position or claim["status"] not in {"Supported", "Needs Review"}:
+                continue
+            if field == "feedback_types":
+                label = "购买／产品咨询" if raw[field][position[0]]["type"] == "Purchase Inquiry" else None
+            elif field == "facts":
+                label = labels.get(raw[field][position[0]]["kind"])
+            else:
+                continue
+            if label is None:
+                continue
+            ids = claim["evidence_ids"]
+            if ids and all(ident in spans for ident in ids):
+                context = "模型分类待复核，仅展示原文" if claim["status"] == "Needs Review" else "原文线索"
+                for ident in ids:
+                    source = f"[{ident} · YouTube 原文]({row['source_url']})"
+                    item = f"- **{label}（{context}）** {source} — {md(spans[ident])}"
+                    if item not in observations:
+                        observations.append(item)
+    lines += observations or ["当前没有可展示的模型线索。"]
+    for failure in state["failures"]:
+        row = failure.get("source")
+        if row is None:
+            continue
+        from automatic_research import validate_sources
+        if row.get("source_platform") != "youtube" or row.get("is_synthetic") is not False or row.get("text_is_preview"):
+            raise ClassificationError("Report fallback requires full real provenance.")
+        row = dict(row)
+        validate_sources([row])
+        lines += ["", "### 模型结果未通过校验的来源",
+                  "以下仅供读者查阅原文。模型结论已隔离。"]
+        for span in evidence_spans(row["review_text"]):
+            lines.append(f"- [{span['id']} · YouTube 原文]({row['source_url']}) — {md(span['text'])}")
     lines += ["", "## Evidence Appendix", "", "### Sources & Methodology", "",
         f"运行 {md(state['run_id'])}；模型 {md(state['model'])}；运行时间 UTC {md(state['collected_at'])}。",
         "通过官方 API 取得的一页近期样本，不是完整评论历史或持续实时监控。评论完整原文留于本次会话内存，没有写入报告文件。",
@@ -420,7 +473,7 @@ def render_live_specialist(state, *, execution=None):
                 elif field == "potential_needs":
                     field = f"potential-{link['path'][1] + 1}"
                 elif field == "feedback_types":
-                    field = row["quality"]["raw"]["feedback_types"][link["path"][1]]["type"]
+                    field = row["quality"]["normalized"]["feedback_types"][link["path"][1]]["type"]
                 lines.append(f"- {md(field)} → {', '.join(ids)}")
         for span in row["quality"].get("evidence_spans", []):
             if span["id"] in used:

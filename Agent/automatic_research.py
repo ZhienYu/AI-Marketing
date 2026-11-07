@@ -1,13 +1,16 @@
 """In-memory YouTube → validated Qwen evidence → specialist report workflow."""
 import copy
+import hashlib
+import json
+from decimal import Decimal
 import uuid
 from datetime import datetime, timezone
 from urllib.parse import urlparse, parse_qs, urlencode
 
 import classify_reviews as classifier
 import orchestrator
-from analysis_control import ControlError, Execution, analysis_readiness
-from evidence_analysis import PROMPT as LIVE_PROMPT, VERSION as EVIDENCE_VERSION
+from analysis_control import ControlError, Execution, KEYWORD_BUDGET_MODE, analysis_readiness, message_token_estimate
+from evidence_analysis import PROMPT as LIVE_PROMPT, VERSION as EVIDENCE_VERSION, evidence_message
 from real_analysis_schema import validate as validate_live_output
 
 PROMPT = LIVE_PROMPT
@@ -130,6 +133,11 @@ def analyze_records(records, execution, *, progress=None):
              "schema_version": EVIDENCE_VERSION, "collected": len(reviews), "results": [], "failures": [], "unprocessed": len(reviews),
              "usage": {}, "status": "completed", "collected_at": datetime.now(timezone.utc).isoformat()}
     settings = None
+
+    def record_usage(usage):
+        for key, count in usage.items():
+            state["usage"][key] = state["usage"].get(key, 0) + count
+
     for index, review in enumerate(reviews):
         if index >= execution.check()["max_calls"]:
             state["status"] = "budget_stopped"
@@ -144,8 +152,7 @@ def analyze_records(records, execution, *, progress=None):
             normalized = output["normalized"]
             state["results"].append({**review, "brand": normalized["brand"]["name"], "analysis": normalized,
                                      "processing": output, "usage": usage})
-            for key, count in usage.items():
-                state["usage"][key] = state["usage"].get(key, 0) + count
+            record_usage(usage)
             if not all(key in usage for key in classifier.TOKEN_FIELDS):
                 state["status"] = "usage_unknown_stopped"
                 state["unprocessed"] = len(reviews) - index - 1
@@ -154,7 +161,11 @@ def analyze_records(records, execution, *, progress=None):
             state["status"] = "permission_or_budget_stopped"
             break
         except classifier.ClassificationError as failure:
-            entry = {"review_id": review["review_id"], "reason": "Model request or evidence validation failed; reserved budget retained. No automatic retry."}
+            record_usage(failure.usage)
+            entry = {"review_id": review["review_id"], "reason": str(failure)}
+            if getattr(failure, "raw_model_text", None) is not None:
+                # Keep a source-only fallback for a rejected model output. It never enters statistics.
+                entry["source"] = review
             if hasattr(failure, "processing"):
                 entry["processing"] = failure.processing
             if getattr(failure, "raw_model_text", None) is not None:
@@ -164,6 +175,12 @@ def analyze_records(records, execution, *, progress=None):
             state["unprocessed"] = len(reviews) - index - 1
             break
         state["unprocessed"] = len(reviews) - index - 1
+    if all(key in state["usage"] for key in classifier.TOKEN_FIELDS):
+        usage = state["usage"]
+        p = execution.check()
+        cost = (usage["prompt_tokens"] * Decimal(str(p["input_cny_per_million"]))
+                + usage["completion_tokens"] * Decimal(str(p["output_cny_per_million"]))) / 1_000_000
+        state["estimated_cny"] = format(cost, "f")
     if progress:
         progress("reporting", len(state["results"]), len(reviews))
     from research_quality import render_live_specialist
@@ -194,6 +211,20 @@ def start_research(query, purpose, months, *, policy=None, paid_confirmed=False,
         return {"mode": "live-read-only", "batch": batch, **collection, "controls": {**gates, "ready": False},
                 "report": None, "reason": "来源字段校验有异常，未启动分析；原始预览与异常字段仍可查看。"}
     reviews = collection["records"]
+    if policy.get("budget_mode") == KEYWORD_BUDGET_MODE:
+        # Prefer a substantive comment near 350 characters. This is an explicit
+        # convenience sample, independent of the analysis result.
+        for row in sorted(reviews, key=lambda row: abs(len(row["review_text"]) - 350)):
+            original = row["review_text"]
+            messages = [{"role": "system", "content": PROMPT},
+                        {"role": "user", "content": json.dumps(evidence_message(original), ensure_ascii=False)}]
+            if message_token_estimate(messages) <= policy["max_input_tokens"]:
+                policy = {**policy, "budget_mode": "single_request_estimate", "single_request_id": uuid.uuid4().hex,
+                          "selected_review_id": row["review_id"], "selected_text_sha256": hashlib.sha256(original.encode("utf-8")).hexdigest()}
+                break
+        else:
+            return {"mode": "live-read-only", "batch": batch, **collection, "controls": gates, "report": None,
+                    "reason": "本轮没有符合输入上限的有效评论，未调用 Qwen。可调整关键词或视频时间范围。"}
     if policy.get("budget_mode") == "single_request_estimate":
         reviews = [row for row in reviews if row["review_id"] == policy["selected_review_id"]]
         if len(reviews) != 1:

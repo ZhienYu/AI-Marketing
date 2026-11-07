@@ -5,6 +5,21 @@ An AI-powered tool for consumer insights and competitive intelligence.
 ## Project Status
 MVP Development
 
+## 本地关键词 → Product Insight Report
+
+从仓库根目录启动（8502 是本地端口，如果被占用可换成 8503）。
+
+```sh
+source .venv/bin/activate
+python -m streamlit run Agent/web_app.py --server.address 127.0.0.1 --server.port 8502 --browser.gatherUsageStats false
+```
+
+打开浏览器访问 `http://127.0.0.1:8502`，输入产品关键词，阅读并确认数据说明，确认本轮付费后点「开始研究」。报告直接显示在网页。终端按 Ctrl+C 停止服务。
+
+在本机授权配置有效时，网页最多采集五个视频、每个十条评论；首版自动从通过来源和输入长度检查的评论中选择一条，绑定该条完整正文和当前 `real-analysis-4` Prompt 后执行一次 Qwen 请求。账本每轮预留 ¥0.0094，输入采用估算，输出上限 1,500 Token。一次研究的分析样本与实际采集量分别展示。探索性观察附原文 Evidence ID 和链接，不计入正式使用属性统计；模型输出不合格时仅展示可追溯来源和失败原因。网页和报告只在本地会话内存中保留。既有单条固定实验配置仍受原有绑定规则约束。
+
+以下为历史里程碑记录。
+
 ### Phase 3.2：单一事实与证据契约（本轮无模型请求）
 
 真实模型输出升级为 `real-analysis-3`，只包含版本、多标签反馈证据、品牌/型号、整体情绪、一份 `facts` 和 `potential_needs`。事实用 kind 区分场景、痛点、明确需求；为保留正面/混合情绪功能，已有明确正面产品反馈时可用 positive_feedback 事实。每个产品反馈事实仅带一次属性类别，不再输出三套痛点文本。型号未明确提及统一为字符串 `unknown`，证据为空数组，不接受 null 或 unk。

@@ -61,7 +61,7 @@ class ClassificationError(Exception):
         self.stop_batch = stop_batch
 
 
-def check_classification(value):
+def check_classification(value, *, dynamic_aspects=False):
     if not isinstance(value, dict) or set(value) != {"sentiment", "positive_aspects", "pain_points", "product_aspects"}:
         raise ClassificationError("Invalid classification fields; output was not saved.")
     sentiment = value["sentiment"]
@@ -87,7 +87,9 @@ def check_classification(value):
     for aspect in aspects:
         if not isinstance(aspect, dict) or set(aspect) != {"aspect", "sentiment", "feedback"}:
             raise ClassificationError("Invalid product aspect fields.")
-        if not isinstance(aspect["aspect"], str) or aspect["aspect"] not in PRODUCT_ASPECTS:
+        label = aspect["aspect"]
+        if (not isinstance(label, str) or
+                (not re.fullmatch(r"\S(?:[^\r\n]{0,78}\S)?", label) if dynamic_aspects else label not in PRODUCT_ASPECTS)):
             raise ClassificationError("Unknown product aspect category.")
         if not isinstance(aspect["sentiment"], str) or aspect["sentiment"] not in SENTIMENTS - {"Mixed"}:
             raise ClassificationError("Invalid product aspect sentiment.")
@@ -227,7 +229,9 @@ def classify_qwen(review, settings, model, *, research=False, automatic=None):
             classification = process_evidence_analysis(decoded, review)
             classification["raw_json"] = raw_model_text
             if classification["status"] == "Invalid":
-                failure = ClassificationError(classification["issues"][0]["reason"])
+                reason = next((issue["reason"] for issue in reversed(classification["issues"]) if "reason" in issue),
+                              "Model evidence did not pass validation.")
+                failure = ClassificationError(reason)
                 failure.processing = classification
                 raise failure
         elif research:

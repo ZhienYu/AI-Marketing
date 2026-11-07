@@ -1,5 +1,6 @@
 """Real-shaped transport contracts using existing synthetic text; no external calls."""
 import copy
+import hashlib
 import io
 import json
 import sys
@@ -76,6 +77,33 @@ class AutomaticResearchTests(unittest.TestCase):
         opener = stack.enter_context(patch.object(classifier.request, "build_opener"))
         opener.return_value.open.side_effect = lambda *a, **k: io.StringIO(json.dumps(body))
         return opener
+
+    def test_keyword_run_binds_one_real_source_and_reserves_once(self):
+        import contextlib
+        p = {**self.p, "budget_mode": control.KEYWORD_BUDGET_MODE,
+             "token_bound_verified": False, "token_estimate_risk_acknowledged": True,
+             "analysis_schema_version": auto.EVIDENCE_VERSION, "max_calls": 1,
+             "analysis_prompt_sha256": hashlib.sha256(auto.PROMPT.encode()).hexdigest(),
+             "max_output_tokens": 1500, "run_token_limit": 9500}
+        with self.assertRaises(control.ControlError):
+            control.Execution(p, "improvement", paid_confirmed=True, run_id="unbound", ledger_path=self.ledger)
+        captured = batch()
+        another = {**captured["videos"][0]["comments"][0], "comment_id": "secondary",
+                   "source_url": "https://www.youtube.com/watch?v=TESTvideo01&lc=secondary",
+                   "review_text": "different comment"}
+        captured["videos"][0]["comments"].append(another)
+        captured["comment_count"] = 2
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(orchestrator, "multi_video_research", return_value=captured))
+            stack.enter_context(patch.object(classifier, "load_local_settings", return_value={"DASHSCOPE_API_KEY": "FAKE_UNIT_KEY"}))
+            opener = self.install_response(stack)
+            result = auto.start_research("Cleaner", "improvement", 6, policy=p, paid_confirmed=True, ledger_path=self.ledger)
+        opener.return_value.open.assert_called_once()
+        payload = json.loads(opener.return_value.open.call_args.args[0].data)
+        self.assertNotIn("different comment", payload["messages"][1]["content"])
+        self.assertEqual(result["audit"]["valid_records"], 2)
+        self.assertEqual(result["collected"], 1)
+        self.assertEqual(result["estimated_cny"], "0.000096")
 
     def test_missing_permission_is_read_only_and_never_loads_qwen_settings(self):
         with patch.object(orchestrator, "multi_video_research", return_value=batch()), patch.object(classifier, "load_local_settings", side_effect=AssertionError("No credentials")), patch.object(classifier, "classify_qwen", side_effect=AssertionError("No Qwen")):
@@ -202,6 +230,27 @@ class AutomaticResearchTests(unittest.TestCase):
             result = auto.analyze_records([record], self.context())
         self.assertIn("有效自述使用反馈 0 条", result["report"])
         self.assertIn("Insufficient Evidence", result["report"])
+        self.assertIn("购买／产品咨询", result["report"])
+        self.assertIn("[S01 · YouTube 原文]", result["report"])
+        self.assertIn("price?", result["report"])
+
+    def test_rejected_model_output_displays_only_original_source_and_keeps_usage(self):
+        import contextlib
+        record = auto.normalize_batch(batch())[0]
+        value = response()
+        value["facts"][0]["summary"] = "UNSUPPORTED MODEL CLAIM"
+        value["brand"]["name"] = "Unsupported Brand"
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch.object(classifier, "load_local_settings", return_value={"DASHSCOPE_API_KEY": "FAKE"}))
+            self.install_response(stack, value=value)
+            result = auto.analyze_records([record], self.context())
+        self.assertEqual(result["status"], "failed_stopped")
+        self.assertEqual(result["results"], [])
+        self.assertEqual(result["estimated_cny"], "0.000096")
+        self.assertIn("模型结果未通过校验的来源", result["report"])
+        self.assertIn(f"[S01 · YouTube 原文]({record['source_url']})", result["report"])
+        self.assertIn("进入属性统计 0 条", result["report"])
+        self.assertNotIn("UNSUPPORTED MODEL CLAIM", result["report"])
 
     def test_competitor_scope_is_separate(self):
         p = self.p.copy()

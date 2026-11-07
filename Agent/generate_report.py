@@ -20,8 +20,8 @@ def markdown(value):
     return re.sub(r"([\\`*\[\]()|#])", r"\\\1", text)
 
 
-def render_report(insights, classified, reviews, dataset="test", *, execution=None):
-    computed = generate_insights(classified, execution=execution)
+def render_report(insights, classified, reviews, dataset="test", *, execution=None, dynamic_aspects=False):
+    computed = generate_insights(classified, execution=execution, dynamic_aspects=dynamic_aspects)
     if computed != insights:
         raise ClassificationError("Insights do not match classifications; regenerate matching insights first.")
     results = classified["results"]
@@ -50,12 +50,13 @@ def render_report(insights, classified, reviews, dataset="test", *, execution=No
     def references(rows):
         return "; ".join(f"{markdown(row['brand'])}: review_id={markdown(row['review_id'])}" for row in rows) or "无"
 
+    aspect_order = tuple(row["aspect"] for row in insights["comparison_table"]) if dataset == "real" else ASPECT_ORDER
     totals = {
         aspect: {polarity: sum(brand["aspect_counts"][aspect][polarity] for brand in insights["brands"].values())
                  for polarity in ("Positive", "Negative", "Neutral")}
-        for aspect in ASPECT_ORDER
+        for aspect in aspect_order
     }
-    ranked = sorted(ASPECT_ORDER, key=lambda aspect: (-totals[aspect]["Negative"], aspect))
+    ranked = sorted(aspect_order, key=lambda aspect: (-totals[aspect]["Negative"], aspect))
     sentiment_counts = Counter(row["sentiment"] for row in results)
     lines = ["# Product Insight Agent — Market Research Report", ""]
     if dataset == "test":
@@ -67,7 +68,7 @@ def render_report(insights, classified, reviews, dataset="test", *, execution=No
     ]
     findings = [aspect for aspect in ranked if totals[aspect]["Negative"]][:3]
     for index, aspect in enumerate(findings, 1):
-        lines.append(f"{index}. **样本事实：{aspect}** 有 {totals[aspect]['Negative']} 条负面提及。证据：{references(evidence(aspect, 'Negative'))}。仅描述当前样本。")
+        lines.append(f"{index}. **样本事实：{markdown(aspect)}** 有 {totals[aspect]['Negative']} 条负面提及。证据：{references(evidence(aspect, 'Negative'))}。仅描述当前样本。")
     if len(findings) < 3:
         lines.append("可支持的独立发现不足三项；Insufficient Evidence，不补造结论。")
     lines += ["", "每品牌样本不足 20 条时为 Insufficient Data，不作真实市场品牌排名。原文与属性反馈见第六部分。", "", "## 2. Consumer Pain Points", "",
@@ -83,7 +84,7 @@ def render_report(insights, classified, reviews, dataset="test", *, execution=No
         lines.append(f"| {sentiment} | {sentiment_counts[sentiment]} |")
     lines += ["", "| 产品属性 | 正面评论数 | 负面评论数 | 中性评论数 | 正面证据 | 负面证据 |", "|---|---:|---:|---:|---|---|"]
     for aspect, counts in totals.items():
-        lines.append(f"| {aspect} | {counts['Positive']} | {counts['Negative']} | {counts['Neutral']} | {references(evidence(aspect, 'Positive'))} | {references(evidence(aspect, 'Negative'))} |")
+        lines.append(f"| {markdown(aspect)} | {counts['Positive']} | {counts['Negative']} | {counts['Neutral']} | {references(evidence(aspect, 'Positive'))} | {references(evidence(aspect, 'Negative'))} |")
     lines += ["", "整体情绪与属性情绪分别统计；同一评论可涉及多个属性，也可同时有正面与负面反馈，属性列不能相加当作评论总数。未知品牌只纳入整体情绪，不进入品牌属性汇总。", "", "## 4. Competitive Intelligence", "",
               "| 品牌 | 有效分类样本量 | 比较限制 |", "|---|---:|---|"]
     for brand, data in insights["brands"].items():
@@ -94,7 +95,7 @@ def render_report(insights, classified, reviews, dataset="test", *, execution=No
               "|---|" + "---|" * len(brands)]
     for row in insights["comparison_table"]:
         cells = [f"{row['brands'][brand]['Positive']} / {row['brands'][brand]['Negative']}" for brand in brands]
-        lines.append(f"| {row['aspect']} | " + " | ".join(cells) + " |")
+        lines.append(f"| {markdown(row['aspect'])} | " + " | ".join(cells) + " |")
     lines += ["", "**零提及不代表满意，也不代表没有问题。** 小样本不支持“某品牌在真实市场最好”等结论。", "", "## 5. Business Opportunities", ""]
     candidates = [aspect for aspect in ranked if totals[aspect]["Negative"] >= 2][:3]
     if not candidates:

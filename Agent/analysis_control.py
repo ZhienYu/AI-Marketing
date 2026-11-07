@@ -17,6 +17,13 @@ PRICE_REFERENCE = "https://help.aliyun.com/zh/model-studio/model-pricing"
 ANALYSIS_ENABLED = True  # Technical availability only; never grants platform rights.
 
 
+KEYWORD_BUDGET_MODE = "keyword_single_request_estimate"
+
+
+def message_token_estimate(messages):
+    return len(json.dumps(messages, ensure_ascii=False).encode("utf-8")) + 4096
+
+
 class ControlError(RuntimeError):
     pass
 
@@ -110,16 +117,23 @@ class Policy:
                 raise ControlError("Incomplete technical configuration.")
         if p.get("prices_verified") is not True:
             raise ControlError("Unverified pricing configuration.")
-        if p.get("token_bound_verified") is not True:
+        if p.get("token_bound_verified") is not True or p.get("budget_mode") == KEYWORD_BUDGET_MODE:
             # Explicitly risk-accepted single-request experiment, not a verified
             # tokenizer or a hard monetary guarantee. Never permits batching.
-            if (p.get("budget_mode") != "single_request_estimate"
+            if (p.get("budget_mode") not in {"single_request_estimate", KEYWORD_BUDGET_MODE}
                 or p.get("token_estimate_risk_acknowledged") is not True
                 or p.get("max_calls") != 1
                 or type(p.get("max_input_tokens")) is not int or not 1 <= p["max_input_tokens"] <= 8000
                 or type(p.get("max_output_tokens")) is not int or not 1 <= p["max_output_tokens"] <= 1500
                 or type(p.get("run_token_limit")) is not int or not 1 <= p["run_token_limit"] <= 9500
-                or not isinstance(p.get("selected_review_id"), str) or not p["selected_review_id"].startswith("youtube:")
+            ):
+                raise ControlError("Unverified Token bounds permit only a separately acknowledged single-request experiment.")
+            if p.get("budget_mode") == KEYWORD_BUDGET_MODE:
+                from evidence_analysis import PROMPT, VERSION
+                if (p.get("analysis_schema_version") != VERSION
+                    or p.get("analysis_prompt_sha256") != hashlib.sha256(PROMPT.encode("utf-8")).hexdigest()):
+                    raise ControlError("Keyword analysis requires the pinned evidence contract and prompt.")
+            elif (not isinstance(p.get("selected_review_id"), str) or not p["selected_review_id"].startswith("youtube:")
                 or not isinstance(p.get("selected_text_sha256"), str) or not re.fullmatch(r"[0-9a-f]{64}", p["selected_text_sha256"])
                 or not isinstance(p.get("single_request_id"), str)
                 or not re.fullmatch(r"[A-Za-z0-9_-]{8,100}", p["single_request_id"])):
@@ -165,6 +179,8 @@ class Execution:
         self.run_id = run_id
         self.ledger_path = Path(ledger_path)
         self.policy.check(purpose)
+        if policy.get("budget_mode") == KEYWORD_BUDGET_MODE:
+            raise ControlError("Bind the keyword execution to one validated source before making a request.")
         if policy.get("budget_mode") == "single_request_estimate":
             # Reuse the experiment identity across reruns: one reservation total,
             # including timeouts/failures. Paid consent remains mandatory.
@@ -211,7 +227,7 @@ class Execution:
         # Byte count plus template allowance is only an estimate unless backed
         # by the separately verified tokenizer reference. Single-request mode
         # explicitly accepts this uncertainty; it must never enable batching.
-        upper = len(json.dumps(payload["messages"], ensure_ascii=False).encode("utf-8")) + 4096
+        upper = message_token_estimate(payload["messages"])
         if upper > p["max_input_tokens"]:
             raise ControlError("Input exceeds the configured token estimate/bound; no request was sent.")
         worst = (Decimal(str(p["input_cny_per_million"])) * p["max_input_tokens"] + Decimal(str(p["output_cny_per_million"])) * p["max_output_tokens"]) / 1000000

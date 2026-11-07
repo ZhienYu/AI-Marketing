@@ -17,7 +17,7 @@ ASPECT_ORDER = (
 BRANDS = ("Brand A", "Brand B", "Brand C")
 
 
-def generate_insights(classified, *, execution=None):
+def generate_insights(classified, *, execution=None, dynamic_aspects=False):
     if not isinstance(classified, dict) or classified.get("mode") not in {"mock", "qwen"}:
         raise ClassificationError("Input must be a mock or qwen classification report.")
     results = classified.get("results")
@@ -29,7 +29,8 @@ def generate_insights(classified, *, execution=None):
         for item in (row["product_aspects"] if isinstance(row.get("product_aspects"), list) else [])
         if isinstance(item, dict) and isinstance(item.get("aspect"), str)
     }
-    aspect_order = ASPECT_ORDER + tuple(sorted((observed & PRODUCT_ASPECTS) - set(ASPECT_ORDER)))
+    aspect_order = (tuple(sorted(observed)) if dynamic_aspects else
+                    ASPECT_ORDER + tuple(sorted((observed & PRODUCT_ASPECTS) - set(ASPECT_ORDER))))
     if any(isinstance(row, dict) and str(row.get("source_platform", "")).casefold() == "youtube" for row in results):
         from analysis_control import Execution
         if not isinstance(execution, Execution):
@@ -51,7 +52,7 @@ def generate_insights(classified, *, execution=None):
             for item in aspects:
                 unique[json.dumps(item, sort_keys=True)] = item
             classification["product_aspects"] = list(unique.values())
-        check_classification(classification)
+        check_classification(classification, dynamic_aspects=dynamic_aspects)
         if result.get("is_synthetic") is True or result.get("source_platform", "").casefold() == "synthetic":
             synthetic_count += 1
         brand = result["brand"]

@@ -7,7 +7,7 @@ from classify_reviews import ClassificationError
 from qualify_feedback import NEGATIVE, POSITIVE
 from real_analysis_schema import (
     MAX_EVIDENCE_IDS, SCHEMA as LEGACY_SCHEMA, VERSION as LEGACY_VERSION,
-    _technical_supported, process_analysis,
+    ASPECT_LABEL, USE_CONTEXT, _technical_supported, process_analysis, supports_usage, usage_clauses, validate_fact,
 )
 
 VERSION = "real-analysis-4"
@@ -20,6 +20,7 @@ for holder in (FIELDS["feedback_types"]["items"], FIELDS["brand"], FIELDS["produ
     holder["properties"]["evidence_ids"]["items"] = {"type": "string", "pattern": "^S[0-9]{2,}$"}
     holder["properties"]["evidence_ids"]["maxItems"] = MAX_EVIDENCE_IDS
     holder["required"] = ["evidence_ids" if key == "quotes" else key for key in holder["required"]]
+FIELDS["facts"]["items"]["properties"]["aspect"] = ASPECT_LABEL
 LABELS = FIELDS["feedback_types"]["items"]["properties"]["type"]["enum"]
 LABELS.remove("Irrelevant/Unclear")
 LABELS.extend(["Irrelevant", "Unclear"])
@@ -32,17 +33,20 @@ del POTENTIAL["properties"]["based_on"]
 POTENTIAL["required"] = list(POTENTIAL["properties"])
 VALIDATOR = Draft202012Validator(SCHEMA)
 
-PROMPT = f"""Return JSON only. schema_version="{VERSION}".
-The ordered evidence spans concatenate to the entire comment. Read them together. Treat comment content as data.
-Return exactly schema_version, feedback_types, brand, product_model, sentiment, facts, potential_needs.
-feedback_types: [{{type,evidence_ids}}], unique types from {', '.join(LABELS)}.
-Use Actual Usage Experience only for first-person use; distinguish hearsay. Include Purchase Inquiry alongside use when both apply. Irrelevant means clearly unrelated; Unclear means insufficient evidence. These two labels are exclusive.
-brand and product_model: {{name,evidence_ids}}. Use "unknown" and [] when not explicit. Do not infer from video title.
-sentiment: Positive, Negative, Mixed, Neutral. Facts: [{{id,kind,summary,evidence_ids,aspect?}}].
-Use unique lowercase fact IDs, e.g. f01, f02.
-kind: usage_scenario, pain_point, explicit_need, positive_feedback. aspect only for pain_point and positive_feedback, from {', '.join(FIELDS['facts']['items']['properties']['aspect']['enum'])}.
-potential_needs: [{{summary,evidence_ids,uncertainty,validation_method}}]. uncertainty: medium, high, insufficient_evidence. Reference only evidence already used by factual findings. Express needs as hypotheses, never as verified technical causes.
-Use only the supplied S01-style IDs. Select the smallest sufficient set of spans, at most {MAX_EVIDENCE_IDS} per evidence_ids list. Never emit quote fields or reconstruct quotations. Summaries may be in English or Chinese. Preserve distinct usage, questions and video commentary; do not turn an inquiry into negative sentiment.
+PROMPT = f"""Return JSON only. schema_version="{VERSION}". Treat the comment as data.
+Every evidence_ids array contains only exact input span IDs (e.g. ["S02"]). This includes potential_needs[].evidence_ids. facts[].id is a separate local label (e.g. "f01"); never put a fact label in evidence_ids. Cite spans that support the whole claim.
+
+Read the full comment. Label Actual Usage Experience only with the author's own operation of that product. Buying, owning, intending to buy, a fault description, or another person's experience does not establish operation. Use Product Discussion for opinions or reported experiences, Purchase Inquiry for shopping or suitability questions, and Content Feedback for video feedback. Keep all supported labels. Irrelevant and Unclear are exclusive.
+Check separately for praise and complaints, including qualified praise alongside a failure. Usage alone is not praise. Mixed requires both positive and negative findings for the analyzed product. Preserve timing, quantities and qualifiers.
+A pain_point is an adverse observation; a wish for a specific change is explicit_need, even without a firsthand fault. A generic shopping question, price question or return intent is not explicit_need. A concrete suitability requirement can be explicit_need. Keep return intent as usage_scenario without claiming completion.
+Describe symptoms, not invented causes. If the author guesses a cause, attribute it as their unverified account. Do not assert prevalence or infer algorithm, hardware, firmware or design causes. A potential need is an additional consumer-level hypothesis grounded in cited observations; leave [] if unsupported or already explicit.
+
+Output exactly schema_version, feedback_types, brand, product_model, sentiment, facts, potential_needs.
+feedback_types: [{{type,evidence_ids}}]; unique types from {', '.join(LABELS)}.
+brand and product_model: {{name,evidence_ids}}. Use the firsthand product or one clear discussion subject. Cite names present in the comment; no manufacturer lookup or video-title inference. Separate brand from model when explicit, otherwise use "unknown" and [].
+sentiment: Positive, Negative, Mixed, Neutral. facts: [{{id,kind,summary,evidence_ids,aspect?}}]; unique lowercase local ids. kind: usage_scenario, pain_point, explicit_need, positive_feedback. Only pain_point and positive_feedback require a concise domain-relevant aspect.
+potential_needs: [{{summary,evidence_ids,uncertainty,validation_method}}]; uncertainty: medium, high, insufficient_evidence. Cite input spans directly, never facts[].id.
+At most {MAX_EVIDENCE_IDS} span IDs per list. Prefer concise source wording for direct observations. No quote fields. Summaries in English or Chinese.
 """
 
 
@@ -63,8 +67,27 @@ def evidence_message(text):
     return {"evidence": [{"id": s["id"], "text": s["text"]} for s in evidence_spans(text)]}
 
 
-INQUIRY_CUE = re.compile(r"recommend|which.{0,50}(?:buy|model|choose)|\bbuy\b|\bprice\b|how much|can it|does it|will it|使え|買|価格|推荐|购买|多少钱", re.I)
-REQUEST_CUE = re.compile(r"\b(?:want|need|wish|looking for)\b|需要|希望", re.I)
+SHOPPING_CUE = re.compile(
+    r"recommend|which.{0,50}(?:buy|model|choose)|\bbuy\b|\bprice\b|how much|how long|can it|does it|will it|"
+    r"使え|買|価格|推荐|购买|多少钱", re.I
+)
+SHOPPING_REQUEST = re.compile(
+    r"\b(?:please recommend|looking for (?:a|an|the|recommendations)|any recommendations)\b|求推荐|请推荐", re.I
+)
+REQUEST_CUE = re.compile(r"\b(?:want|need|wish|hope|looking for)\b|需要|希望", re.I)
+SPECULATIVE_CAUSE = re.compile(r"\b(?:due to|caused by|designed to fail)\b", re.I)
+FUTURE_OR_WISH = re.compile(r"\b(?:will eventually|i hope|we hope|i wish|we wish)\b", re.I)
+OPTION_QUESTION = re.compile(
+    r"\b(?:what do you think|your thoughts)\b[^?]{0,100}\bas (?:an?|the) (?:\w+ )?option\b"
+    r"|\bwould\b[^?]{0,80}\bbe (?:an?|the) (?:\w+ )?option\b", re.I
+)
+
+
+def supports_purchase_inquiry(span):
+    return bool(SHOPPING_REQUEST.search(span) or
+                (span.rstrip().endswith(("?", "？")) and (SHOPPING_CUE.search(span) or OPTION_QUESTION.search(span))))
+
+
 TOPICS = (
     r"\b(?:dock(?:ing|s)?|charg(?:e|ing))\b|回充|充电",
     r"\bdrains?\b|排水口",
@@ -73,9 +96,10 @@ TOPICS = (
     r"传感器|センサー|\bsensors?\b",
     r"算法|アルゴリズム|\balgorithms?\b",
     r"固件|ファームウェア|\bfirmware\b",
+    r"电机|モーター|\bmotors?\b",
 )
-NEGATIVE_CUE = NEGATIVE + r"|\b(?:doesn['’]?t|didn['’]?t|did not|died|broke down|does not work)\b|卡住|故障|不能"
-POSITIVE_CUE = POSITIVE + r"|\b(?:liked|lasted)\b|好用|满意"
+NEGATIVE_CUE = NEGATIVE + r"|\b(?:doesn['’]?t|didn['’]?t|did not|died|broke down|does not work|uncomfortable|crash(?:ed|es)?|drains?|stopped working|unexpected charge)\b|卡住|故障|不能"
+POSITIVE_CUE = POSITIVE + r"|\b(?:liked|lasted|comfortable|worked well)\b|好用|满意"
 
 
 def normalize_structure(raw):
@@ -96,11 +120,16 @@ def normalize_structure(raw):
             if canonical != old:
                 fact["id"] = canonical
                 changes.append({"path": ["facts", index, "id"], "from": old, "to": canonical})
-    issues = [
-        {"code": "invalid_analysis", "reason": "Evidence Schema mismatch at " + "/".join(map(str, e.absolute_path)),
-         "rule": e.validator}
-        for e in VALIDATOR.iter_errors(value)
-    ]
+    issues = []
+    for error in VALIDATOR.iter_errors(value):
+        path = list(error.absolute_path)
+        issue = {"code": "invalid_analysis", "reason": "Evidence Schema mismatch at " + "/".join(map(str, path)),
+                 "rule": error.validator}
+        if (error.validator == "pattern" and "evidence_ids" in path
+                and isinstance(error.instance, str)
+                and re.fullmatch(r"f(?:act-)?[0-9]+", error.instance, re.I)):
+            issue["detail"] = "Fact ID used where an input span ID is required."
+        issues.append(issue)
     if not issues:
         ids = [fact["id"] for fact in value["facts"]]
         if len(ids) != len(set(ids)):
@@ -110,83 +139,173 @@ def normalize_structure(raw):
 
 def process_evidence_analysis(raw, review):
     value, changes, issues = normalize_structure(raw)
-    result = {"raw": copy.deepcopy(raw), "normalized": None, "normalizations": changes, "issues": issues, "status": "Invalid"}
+    result = {"raw": copy.deepcopy(raw), "normalized": None, "normalizations": changes,
+              "issues": issues, "status": "Invalid", "claim_quality": []}
     if issues:
         return result
     text = review["review_text"]
     spans = evidence_spans(text)
-    by_id = {s["id"]: s for s in spans}
+    by_id = {span["id"]: span for span in spans}
+    result["evidence_spans"] = spans
     projected = copy.deepcopy(value)
     projected["schema_version"] = LEGACY_VERSION
     links = []
-    result.update(evidence_spans=spans, evidence_links=links)
-    review_issues = []
-    labels = {f["type"] for f in value["feedback_types"]}
-    try:
-        if len(labels) > 1 and labels & {"Irrelevant", "Unclear"}:
-            raise ValueError("Irrelevant or Unclear conflicts with other feedback labels.")
-        if labels & {"Irrelevant", "Unclear"} and (value["facts"] or value["potential_needs"]):
-            raise ValueError("Irrelevant or Unclear cannot assert product findings.")
-        def resolve(ids, path):
-            if any(ident not in by_id for ident in ids):
-                raise ValueError("Unknown evidence ID at " + "/".join(map(str, path)))
-            links.append({"path": path, "evidence_ids": list(ids)})
-            return [by_id[ident]["text"] for ident in ids]
+    result["evidence_links"] = links
 
-        for index, item in enumerate(projected["feedback_types"]):
-            item["quotes"] = resolve(item.pop("evidence_ids"), ["feedback_types", index])
-            label = item["type"]
-            if label == "Purchase Inquiry" and not any(INQUIRY_CUE.search(q) or REQUEST_CUE.search(q) for q in item["quotes"]):
-                raise ValueError("Selected spans do not support purchase inquiry.")
-            if label in {"Irrelevant", "Unclear"}:
-                item["type"] = "Irrelevant/Unclear"
-        for field in ("brand", "product_model"):
-            item = projected[field]
-            item["quotes"] = resolve(item.pop("evidence_ids"), [field])
-        for index, item in enumerate(projected["facts"]):
-            ids = item.pop("evidence_ids")
-            item["quotes"] = resolve(ids, ["facts", index])
-            summary = item["summary"]
-            selected = set(ids)
-            exact = any(
-                all(span["id"] in selected for span in spans
-                    if span["start"] < match.end() and span["end"] > match.start())
-                for match in re.finditer(re.escape(summary), text)
-            )
-            if summary in text and not exact:
-                raise ValueError("Fact points to a different passage than its source text.")
-            if item["kind"] == "explicit_need" and not any(INQUIRY_CUE.search(q) or REQUEST_CUE.search(q) for q in item["quotes"]):
-                raise ValueError("Selected spans do not express a request or need.")
-            polarity = {"pain_point": NEGATIVE_CUE, "positive_feedback": POSITIVE_CUE}.get(item["kind"])
-            if polarity and all(q.rstrip().endswith(("?", "？")) for q in item["quotes"]):
+    def fatal(reason):
+        issues.append({"code": "invalid_analysis", "reason": str(reason)})
+        return result
+
+    def rate(path, item, status, reason=None):
+        entry = {"path": path, "status": status, "evidence_ids": item["evidence_ids"]}
+        if reason:
+            entry["reason"] = str(reason)
+        result["claim_quality"].append(entry)
+
+    def quotes(item):
+        return [by_id[ident]["text"] for ident in item["evidence_ids"]]
+
+    def link(path, item):
+        links.append({"path": path, "evidence_ids": item["evidence_ids"]})
+
+    labels = [f["type"] for f in value["feedback_types"]]
+    if len(labels) != len(set(labels)):
+        return fatal("Duplicate feedback type.")
+    if set(labels) & {"Irrelevant", "Unclear"} and (len(labels) > 1 or value["facts"] or value["potential_needs"]):
+        return fatal("Irrelevant or Unclear conflicts with product findings.")
+    entries = [(field, value[field]) for field in ("brand", "product_model")]
+    for field in ("feedback_types", "facts", "potential_needs"):
+        entries.extend((f"{field}/{index}", item) for index, item in enumerate(value[field]))
+    for path, item in entries:
+        if any(ident not in by_id for ident in item["evidence_ids"]):
+            rate(path.split("/"), item, "Unsupported", "Unknown evidence ID.")
+            return fatal("Unknown evidence ID at " + path)
+
+    projected["feedback_types"] = []
+    for index, item in enumerate(value["feedback_types"]):
+        label = item["type"]
+        source = quotes(item)
+        if label == "Purchase Inquiry" and not any(supports_purchase_inquiry(q) for q in source):
+            rate(["feedback_types", index], item, "Unsupported", "Selected spans do not support purchase inquiry.")
+            issues.append({"code": "unsupported_claim", "reason": "Selected spans do not support purchase inquiry."})
+            continue
+        if label == "Actual Usage Experience" and not any(supports_usage(q, text) for q in source):
+            status = "Needs Review" if any(USE_CONTEXT.search(q) for q in source) else "Unsupported"
+            rate(["feedback_types", index], item, status, "Selected spans do not establish firsthand use.")
+            issues.append({"code": "unsupported_claim", "reason": "Selected spans do not establish firsthand use."})
+            continue
+        rate(["feedback_types", index], item, "Needs Review" if label == "Unclear" else "Supported")
+        link(["feedback_types", len(projected["feedback_types"])], item)
+        projected["feedback_types"].append({"type": "Irrelevant/Unclear" if label in {"Irrelevant", "Unclear"} else label,
+                                            "quotes": source})
+    for field in ("brand", "product_model"):
+        item = value[field]
+        source = quotes(item)
+        name = item["name"]
+        if (name == "unknown" and source) or (name != "unknown" and not any(name.casefold() in q.casefold() for q in source)):
+            rate([field], item, "Unsupported", "Entity lacks original attribution evidence.")
+            return fatal("Entity lacks original attribution evidence.")
+        rate([field], item, "Supported")
+        projected[field] = {"name": name, "quotes": source}
+        link([field], item)
+
+    projected["facts"] = []
+    fact_quality = {}
+    for index, item in enumerate(value["facts"]):
+        ident, summary, kind = item["id"], item["summary"], item["kind"]
+        path = ["facts", index]
+        source = quotes(item)
+        selected = set(item["evidence_ids"])
+        exact = any(
+            all(span["id"] in selected for span in spans
+                if span["start"] < match.end() and span["end"] > match.start())
+            for match in re.finditer(re.escape(summary), text)
+        )
+        if summary in text and not exact:
+            rate(path, item, "Unsupported", "Fact points to a different passage than its source text.")
+            return fatal("Fact points to a different passage than its source text.")
+        fact = {k: v for k, v in item.items() if k != "evidence_ids"}
+        fact["quotes"] = source
+        polarity = {"pain_point": NEGATIVE_CUE, "positive_feedback": POSITIVE_CUE}.get(kind)
+        try:
+            if kind == "explicit_need" and not any(
+                REQUEST_CUE.search(q) or (supports_purchase_inquiry(q) and not OPTION_QUESTION.search(q)) for q in source
+            ):
+                raise ValueError("Selected spans do not express a specific request or need.")
+            if polarity and all(q.rstrip().endswith(("?", "？")) for q in source):
                 raise ValueError("A question alone does not establish a product experience.")
-            for pattern in TOPICS:
-                if re.search(pattern, summary, re.I) and not any(re.search(pattern, q, re.I) for q in item["quotes"]):
-                    raise ValueError("Fact topic is unsupported by its selected spans.")
-            if not exact or (polarity and not any(re.search(polarity, q, re.I) for q in item["quotes"])):
-                review_issues.append({"code": "semantic_review_required", "fact_index": index})
-        for index, need in enumerate(projected["potential_needs"]):
-            ids = set(need.pop("evidence_ids"))
-            quotes = resolve(sorted(ids), ["potential_needs", index])
-            _technical_supported(need["summary"], quotes)
-            for pattern in TOPICS:
-                if re.search(pattern, need["summary"], re.I) and not any(re.search(pattern, q, re.I) for q in quotes):
-                    raise ValueError("Inference topic is unsupported by its selected spans.")
-            facts = [f for f in value["facts"] if set(f["evidence_ids"]) <= ids]
+            if kind == "pain_point" and all(FUTURE_OR_WISH.search(q) for q in source):
+                raise ValueError("A prediction or wish alone does not establish an observed pain point.")
+            if SPECULATIVE_CAUSE.search(summary) and not any(supports_usage(q, text) for q in source):
+                raise ValueError("A consumer's causal attribution needs review and cannot establish a technical fact.")
+            if any(re.search(pattern, summary, re.I) and not any(re.search(pattern, q, re.I) for q in source) for pattern in TOPICS):
+                raise ValueError("Fact topic is unsupported by its selected spans.")
+            validate_fact(fact)
+        except (ValueError, ClassificationError) as exc:
+            fact_quality[ident] = "Unsupported"
+            rate(path, item, "Unsupported", exc)
+            issues.append({"code": "unsupported_claim", "reason": str(exc), "fact_id": ident})
+            continue
+        status = "Supported" if exact and (not polarity or any(re.search(polarity, q, re.I) for q in source)) else "Needs Review"
+        fact_quality[ident] = status
+        rate(path, item, status, "Paraphrase or polarity requires semantic review." if status == "Needs Review" else None)
+        if status == "Needs Review":
+            issues.append({"code": "semantic_review_required", "fact_id": ident})
+        link(["facts", len(projected["facts"])], item)
+        projected["facts"].append(fact)
+
+    projected["potential_needs"] = []
+    for index, item in enumerate(value["potential_needs"]):
+        path = ["potential_needs", index]
+        ids = set(item["evidence_ids"])
+        source = quotes(item)
+        facts = [f for f in value["facts"] if set(f["evidence_ids"]) <= ids and fact_quality[f["id"]] != "Unsupported"]
+        try:
+            _technical_supported(item["summary"], source)
+            if any(re.search(pattern, item["summary"], re.I) and not any(re.search(pattern, q, re.I) for q in source) for pattern in TOPICS):
+                raise ValueError("Inference topic is unsupported by its selected spans.")
             if {ident for fact in facts for ident in fact["evidence_ids"]} != ids:
                 raise ValueError("Potential need must reference evidence used by factual findings.")
-            need["based_on"] = [f["id"] for f in facts]
-    except (ValueError, ClassificationError) as exc:
-        result["issues"] = [{"code": "invalid_analysis", "reason": str(exc)}]
-        return result
-    result = process_analysis(projected, review, evidence_projection=True)
-    result.update(raw=copy.deepcopy(raw), evidence_spans=spans, evidence_links=links)
-    result["normalizations"] = changes + result["normalizations"]
-    if labels == {"Unclear"} and result["status"] == "Excluded":
-        result.update(status="Partial", issues=[{"code": "relevance_unconfirmed"}])
-    if result["status"] in {"Valid", "Partial"} and review_issues:
-        for issue in review_issues:
-            issue["fact_id"] = result["normalized"]["facts"][issue.pop("fact_index")]["id"]
-        result["issues"].extend(review_issues)
+        except (ValueError, ClassificationError) as exc:
+            rate(path, item, "Unsupported", exc)
+            issues.append({"code": "unsupported_claim", "reason": str(exc)})
+            continue
+        pending = any(fact_quality[f["id"]] == "Needs Review" for f in facts)
+        rate(path, item, "Needs Review" if pending else "Supported",
+             "A supporting fact awaits review." if pending else None)
+        need = {k: v for k, v in item.items() if k != "evidence_ids"}
+        need["based_on"] = [f["id"] for f in facts]
+        link(["potential_needs", len(projected["potential_needs"])], item)
+        projected["potential_needs"].append(need)
+
+    if not projected["feedback_types"]:
+        return fatal("No supported feedback category remains.")
+    retained = {f["type"] for f in projected["feedback_types"]}
+    if any(usage_clauses(text)) and "Actual Usage Experience" not in retained:
+        return fatal("Explicit use evidence was dropped.")
+    positive = any(f["kind"] == "positive_feedback" for f in projected["facts"])
+    negative = any(f["kind"] == "pain_point" for f in projected["facts"])
+    expected = {(True, True): "Mixed", (True, False): "Positive", (False, True): "Negative", (False, False): "Neutral"}[positive, negative]
+    if expected != projected["sentiment"]:
+        issues.append({"code": "sentiment_projection", "reason": "Overall sentiment differs from retained facts."})
+        changes.append({"path": ["sentiment"], "from": projected["sentiment"], "to": expected, "projection_only": True})
+        projected["sentiment"] = expected
+    if "Actual Usage Experience" in retained:
+        for found, cue, kind in ((negative, NEGATIVE_CUE, "pain_point"),
+                                 (positive, POSITIVE_CUE, "positive_feedback")):
+            ids = [span["id"] for span in spans if re.search(cue, span["text"], re.I)]
+            if not found and ids:
+                reason = "Source language suggests a missing finding; verify coverage."
+                rate(["coverage", kind], {"evidence_ids": ids}, "Incomplete", reason)
+                issues.append({"code": f"missing_{kind}", "reason": reason})
+
+    legacy = process_analysis(projected, review, evidence_projection=True)
+    result.update(normalized=legacy["normalized"], status=legacy["status"])
+    changes.extend(legacy["normalizations"])
+    issues.extend(legacy["issues"])
+    if labels == ["Unclear"] and result["status"] == "Excluded":
+        issues[:] = [{"code": "relevance_unconfirmed"}]
+        result["status"] = "Partial"
+    elif issues and result["status"] == "Valid":
         result["status"] = "Partial"
     return result

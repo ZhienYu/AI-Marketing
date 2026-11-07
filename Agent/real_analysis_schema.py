@@ -46,6 +46,8 @@ _projection = PROJECTION_SCHEMA["properties"]
 for _holder in (_projection["feedback_types"]["items"], _projection["brand"],
                 _projection["product_model"], _projection["facts"]["items"]):
     _holder["properties"]["quotes"]["maxItems"] = MAX_EVIDENCE_IDS
+ASPECT_LABEL = {"type": "string", "minLength": 1, "maxLength": 80, "pattern": r"^\S(?:[^\r\n]*\S)?$"}
+_projection["facts"]["items"]["properties"]["aspect"] = ASPECT_LABEL
 PROJECTION_VALIDATOR = Draft202012Validator(PROJECTION_SCHEMA)
 USE_PATTERN = r"\b(?:I|we)\s+(?:(?:have|had|already|actually)\s+){0,2}(?:tried|used|tested)\b|(?:^|[.!?]\s+)(?:tried|used|tested)\s+"
 TECHNICAL = r"\b(?:torque|sensor(?:s)?|firmware|algorithm(?:s)?|motor failure)\b"
@@ -61,10 +63,46 @@ SUITABILITY_QUESTION = r"(?:使える|使えますか)[？?]|\b(?:can|does|will)
 MEDIA_ASIDE = r"\breference\b[\s\S]*\bcomment section\b"
 
 
+AFTER_USE = re.compile(
+    r"\b(?:rinsed|cleaned|washed|charged|recharged|wiped|stored|packed|logged out)\b"
+    r"[^.!?]{0,35}\bafter (?:each|every) (?:use|session|run|workout)\b", re.I
+)
+
+
+USE_CONTEXT = re.compile(
+    r"\bwhen (?:I|we) (?:use[ds]?|listen(?:ed)?|play(?:ed)?|wear|wore|run|ran|open(?:ed)?|charge[ds]?)\b", re.I
+)
+DIRECT_OBSERVATION = re.compile(
+    r"^(?:I|we) (?:keep having|kept having|noticed|experienced|encountered)\b", re.I
+)
+NON_ACTUAL = re.compile(
+    r'["“”]|\b(?:if|would|could|will|should|might|never|not|didn.t|heard that|told that|from reviews|in reviews|said|says|told)\b', re.I
+)
+
+
+def _observed_use(clause):
+    # Separate a new first-person assertion from a nearby attributed account.
+    for part in re.split(r"\b(?:and|but)\s+(?=(?:I|we)\b)", clause, flags=re.I):
+        context = USE_CONTEXT.search(part)
+        if (context and DIRECT_OBSERVATION.match(part)
+                and not NON_ACTUAL.search(part) and not re.search(INDIRECT, part, re.I)):
+            yield part.rstrip(".!")
+
+
+
 def usage_clauses(text):
     for match in re.finditer(r"[^.!?\n]+[.!?]?", text):
         clause = match.group().strip()
-        if clause.endswith("?") or re.search(INDIRECT, clause, re.I):
+        if clause.endswith(("?", "？")):
+            continue
+        yield from _observed_use(clause)
+        if re.search(INDIRECT, clause, re.I):
+            continue
+        if (re.match(r"^(?:I|we)\b", clause, re.I)
+                and not re.search(r'["“”]|\b(?:would|could|if|will|should)\b', clause, re.I)
+                and any(AFTER_USE.search(action) and not re.search(r"\b(?:never|not|didn.t)\b", action, re.I)
+                        for action in re.split(r"\b(?:and|but)\b", clause, flags=re.I))):
+            yield clause.rstrip(".!")
             continue
         if re.search(r'["“”]|\b(?:never|not|would|if|haven.t|hadn.t)\b', clause, re.I):
             continue
@@ -107,6 +145,14 @@ def _technical_supported(summary, original):
         if not any(match.group().casefold() in source.casefold() for source in sources):
             raise ClassificationError("Technical cause/specification is not supported by the original comment.")
 
+
+def validate_fact(fact):
+    _technical_supported(fact["summary"], fact["quotes"])
+    for match in re.finditer(r"\b(?:may|might|potential|possibly|because|due to|caused by|insufficient|faulty)\b", fact["summary"], re.I):
+        if not any(match.group().casefold() in q.casefold() for q in fact["quotes"]):
+            raise ClassificationError("A factual summary introduces an unsupported inference or cause.")
+    if fact["kind"] == "explicit_need" and not any(re.search(r"[?？]|\b(?:want|need|wish|hope|looking for|recommend|recommendation)\b|需要|希望", q, re.I) for q in fact["quotes"]):
+        raise ClassificationError("Explicit need lacks a quoted request/want.")
 
 def validate(value, review, *, allow_incomplete=False, evidence_projection=False):
     validator = PROJECTION_VALIDATOR if evidence_projection else VALIDATOR
@@ -158,18 +204,13 @@ def validate(value, review, *, allow_incomplete=False, evidence_projection=False
             raise ClassificationError("Duplicate fact ID or duplicated fact.")
         facts[fact["id"]] = fact
         signatures.add(signature)
-        _technical_supported(fact["summary"], fact["quotes"])
-        for match in re.finditer(r"\b(?:may|might|potential|possibly|because|due to|caused by|insufficient|faulty)\b", fact["summary"], re.I):
-            if not any(match.group().casefold() in q.casefold() for q in fact["quotes"]):
-                raise ClassificationError("A factual summary introduces an unsupported inference or cause.")
-        if fact["kind"] == "explicit_need" and not any(re.search(r"[?？]|\b(?:want|need|wish|looking for|recommend|recommendation)\b|需要|希望", q, re.I) for q in fact["quotes"]):
-            raise ClassificationError("Explicit need lacks a quoted request/want.")
+        validate_fact(fact)
     negative = [f for f in facts.values() if f["kind"] == "pain_point"]
     positive = [f for f in facts.values() if f["kind"] == "positive_feedback"]
     expected = {(True, True): "Mixed", (True, False): "Negative", (False, True): "Positive", (False, False): "Neutral"}[(bool(negative), bool(positive))]
     if value["sentiment"] != expected:
         raise ClassificationError("Overall sentiment disagrees with the canonical feedback facts.")
-    if "Actual Usage Experience" in labels and re.search(r"\b(?:got stuck|broke|stopped working)\b", text, re.I) and not negative:
+    if "Actual Usage Experience" in labels and re.search(r"\b(?:got stuck|broke|stopped working)\b", text, re.I) and not negative and not evidence_projection:
         raise ClassificationError("Explicit product failure evidence was omitted.")
     for need in value["potential_needs"]:
         if any(ref not in facts for ref in need["based_on"]):
@@ -319,7 +360,7 @@ def compatibility_view(value, review, *, allow_incomplete=False, evidence_projec
             "text": need["summary"], "quotes": quotes, "quote": quotes[0],
             "claim_type": "model_inference", "evidence_ids": list(need["based_on"]),
             "uncertainty": need["uncertainty"], "validation_step": need["validation_method"]})
-    check_classification(classification)
+    check_classification(classification, dynamic_aspects=evidence_projection)
     feedback = [{"feedback_type": f["type"], "quotes": copy.deepcopy(f["quotes"]), "quote": f["quotes"][0]} for f in value["feedback_types"]]
     labels = [f["type"] for f in value["feedback_types"]]
     use_quotes = next((f["quotes"] for f in value["feedback_types"] if f["type"] == "Actual Usage Experience"), [])

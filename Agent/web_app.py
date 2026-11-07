@@ -3,7 +3,7 @@ import time
 import hashlib
 import json
 import streamlit as st
-from analysis_control import load_config, analysis_readiness
+from analysis_control import KEYWORD_BUDGET_MODE, load_config, analysis_readiness
 from automatic_research import start_research, inspect_collection
 from consumer_needs import PURPOSES
 from session_memory import SessionResult
@@ -60,7 +60,9 @@ def main():
     paid = False
     if ready:
         st.caption(f"模型 {policy['model']} · 最多 {policy['max_calls']} 次调用 · 单次运行预留上限 ¥{policy['run_cny_limit']} · UTC 每日累计上限 ¥{policy['daily_cny_limit']}。")
-        if policy.get("budget_mode") == "single_request_estimate":
+        if policy.get("budget_mode") == KEYWORD_BUDGET_MODE:
+            st.caption(f"从本轮有效评论中自动选择一条进行分析，输出最多 {policy['max_output_tokens']} Token。输入采用保守估算，账本每次预留 ¥0.0094，实际费用以服务商账单为准。Qwen 不自动重试。")
+        elif policy.get("budget_mode") == "single_request_estimate":
             st.warning(f"首次单条实验：输入仅设 {policy['max_input_tokens']} Token 估算阈值，输出最多 {policy['max_output_tokens']} Token；Token 上界未严格验证，¥1 是预算目标而非实际账单硬保证。同一实验最多一次请求，失败或超时也不自动重试。")
         else:
             st.caption(f"每次最多输入 {policy['max_input_tokens']} / 输出 {policy['max_output_tokens']} Tokens；本次 Token 总预留上限 {policy['run_token_limit']}。超时和失败不退款、不自动重试。")
@@ -95,6 +97,11 @@ def main():
     if result:
         if result["mode"] == "research":
             st.markdown(result["report"])
+            if "estimated_cny" in result:
+                usage = result["usage"]
+                st.caption(f"本轮 Qwen · 输入 {usage['prompt_tokens']} / 输出 {usage['completion_tokens']} Token · 按配置单价估算 ¥{result['estimated_cny']}。")
+            if result.get("status", "completed") != "completed":
+                st.warning("分析未完整完成。请查看报告中的来源、失败记录和运行状态。")
         else:
             st.warning(result["reason"])
         batch = result["batch"]
