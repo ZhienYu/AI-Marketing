@@ -252,7 +252,7 @@ def run_expanded(purpose="both", *, output_root=None):
     return paths
 
 
-def render_live_specialist(state, *, execution=None):
+def render_live_specialist(state, *, execution=None, statistics_only=False):
     """Use the existing two research purposes with actual validated model claims.
 
     Does not call an LLM or persist content. Unlike synthetic editorial templates,
@@ -325,6 +325,8 @@ def render_live_specialist(state, *, execution=None):
     insights = generate_insights(classified, execution=execution, dynamic_aspects=dynamic_aspects)
     if classified["results"]:
         render_report(insights, classified, eligible, dataset="real", execution=execution, dynamic_aspects=dynamic_aspects)  # reuse source/aggregate consistency validation
+    if statistics_only:
+        return classified["results"]
     refs = {row["review_id"]: f"E{i:02d}" for i, row in enumerate(eligible, 1)}
     cite = lambda row: f"[{refs[row['review_id']]}](#{refs[row['review_id']].lower()})"
     categories = Counter(label for row in processed for label in row["analysis"]["feedback_types"])

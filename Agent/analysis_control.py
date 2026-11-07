@@ -7,6 +7,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from threading import Lock
 
 CONFIG_PATH = Path(__file__).parent / "config/research_access.json"
 LEDGER_PATH = Path(__file__).parent / ".runtime/research_budget.sqlite3"
@@ -18,6 +19,13 @@ ANALYSIS_ENABLED = True  # Technical availability only; never grants platform ri
 
 
 KEYWORD_BUDGET_MODE = "keyword_single_request_estimate"
+BATCH_BUDGET_MODE = "keyword_batch_estimate"
+BATCH_MAX_COMMENTS = 10
+BATCH_SIZE = 4
+BATCH_MAX_CALLS = 3
+BATCH_INPUT = 11000
+BATCH_OUTPUT = 3000
+BATCH_RESERVATION_CNY = Decimal("0.0444")
 
 
 def message_token_estimate(messages):
@@ -117,7 +125,18 @@ class Policy:
                 raise ControlError("Incomplete technical configuration.")
         if p.get("prices_verified") is not True:
             raise ControlError("Unverified pricing configuration.")
-        if p.get("token_bound_verified") is not True or p.get("budget_mode") == KEYWORD_BUDGET_MODE:
+        if p.get("budget_mode") == BATCH_BUDGET_MODE:
+            from multi_comment_research import BATCH_PROMPT
+            from evidence_analysis import VERSION
+            if (p.get("token_estimate_risk_acknowledged") is not True
+                or p.get("analysis_schema_version") != VERSION
+                or p.get("analysis_prompt_sha256") != hashlib.sha256(BATCH_PROMPT.encode()).hexdigest()
+                or p.get("max_calls") != BATCH_MAX_CALLS or p.get("max_input_tokens") != BATCH_INPUT
+                or p.get("max_output_tokens") != BATCH_OUTPUT
+                or p.get("run_token_limit") != BATCH_MAX_CALLS * (BATCH_INPUT + BATCH_OUTPUT)
+                or Decimal(str(p["run_cny_limit"])) != BATCH_RESERVATION_CNY):
+                raise ControlError("Invalid multi-comment request, prompt or budget configuration.")
+        elif p.get("token_bound_verified") is not True or p.get("budget_mode") == KEYWORD_BUDGET_MODE:
             # Explicitly risk-accepted single-request experiment, not a verified
             # tokenizer or a hard monetary guarantee. Never permits batching.
             if (p.get("budget_mode") not in {"single_request_estimate", KEYWORD_BUDGET_MODE}
@@ -171,7 +190,7 @@ class Execution:
     identifiers are persisted. Config evidence is an operator attestation, not
     an automatically verified grant of platform rights.
     """
-    def __init__(self, policy, purpose, *, paid_confirmed=False, run_id, ledger_path=LEDGER_PATH):
+    def __init__(self, policy, purpose, *, paid_confirmed=False, run_id, ledger_path=LEDGER_PATH, batch_messages=()):
         if paid_confirmed is not True:
             raise ControlError("Explicit confirmation is required before paid model requests.")
         self.policy = Policy(policy)
@@ -179,6 +198,14 @@ class Execution:
         self.run_id = run_id
         self.ledger_path = Path(ledger_path)
         self.policy.check(purpose)
+        self._batch_lock = Lock()
+        self._remaining_batches = [self._message_digest(messages) for messages in batch_messages]
+        self._planned_batch_count = len(self._remaining_batches)
+        if policy.get("budget_mode") == BATCH_BUDGET_MODE and (
+            not self._remaining_batches or len(self._remaining_batches) > BATCH_MAX_CALLS
+            or len(set(self._remaining_batches)) != len(self._remaining_batches)
+        ):
+            raise ControlError("Multi-comment execution requires a frozen request plan.")
         if policy.get("budget_mode") == KEYWORD_BUDGET_MODE:
             raise ControlError("Bind the keyword execution to one validated source before making a request.")
         if policy.get("budget_mode") == "single_request_estimate":
@@ -194,8 +221,29 @@ class Execution:
                 raise ControlError("Server approval configuration changed or was revoked.")
         return p
 
+    @staticmethod
+    def _message_digest(messages):
+        return hashlib.sha256(json.dumps(messages, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+    @property
+    def reserved_batch_count(self):
+        with self._batch_lock:
+            return self._planned_batch_count - len(self._remaining_batches)
+
     def reserve(self, payload):
         try:
+            if self.policy.value.get("budget_mode") == BATCH_BUDGET_MODE:
+                messages = payload.get("messages")
+                digest = self._message_digest(messages)
+                with self._batch_lock:
+                    if not self._remaining_batches or digest != self._remaining_batches[0]:
+                        raise ControlError("The batch differs from the next frozen request.")
+                    if (not isinstance(messages, list) or not messages or messages[0].get("role") != "system"
+                        or hashlib.sha256(messages[0]["content"].encode()).hexdigest() != self.policy.value["analysis_prompt_sha256"]):
+                        raise ControlError("The batch prompt does not match the approved configuration.")
+                    cost = self._reserve(payload)
+                    self._remaining_batches.pop(0)
+                    return cost
             return self._reserve(payload)
         except (OSError, sqlite3.Error):
             raise ControlError("Budget ledger unavailable; no model request was sent.") from None

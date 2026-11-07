@@ -3,7 +3,7 @@ import time
 import hashlib
 import json
 import streamlit as st
-from analysis_control import KEYWORD_BUDGET_MODE, load_config, analysis_readiness
+from analysis_control import BATCH_BUDGET_MODE, KEYWORD_BUDGET_MODE, load_config, analysis_readiness
 from automatic_research import start_research, inspect_collection
 from consumer_needs import PURPOSES
 from session_memory import SessionResult
@@ -60,7 +60,10 @@ def main():
     paid = False
     if ready:
         st.caption(f"模型 {policy['model']} · 最多 {policy['max_calls']} 次调用 · 单次运行预留上限 ¥{policy['run_cny_limit']} · UTC 每日累计上限 ¥{policy['daily_cny_limit']}。")
-        if policy.get("budget_mode") == KEYWORD_BUDGET_MODE:
+        if policy.get("budget_mode") == BATCH_BUDGET_MODE:
+            st.caption(f"目标 10 条评论，最多 {policy['max_calls']} 次请求。每次输出上限 {policy['max_output_tokens']} Token，"
+                       f"整轮最多预留 ¥{policy['run_cny_limit']}。输入采用保守估算，实际账单以百炼为准。模型不自动重试。")
+        elif policy.get("budget_mode") == KEYWORD_BUDGET_MODE:
             st.caption(f"从本轮有效评论中自动选择一条进行分析，输出最多 {policy['max_output_tokens']} Token。输入采用保守估算，账本每次预留 ¥0.0094，实际费用以服务商账单为准。Qwen 不自动重试。")
         elif policy.get("budget_mode") == "single_request_estimate":
             st.warning(f"首次单条实验：输入仅设 {policy['max_input_tokens']} Token 估算阈值，输出最多 {policy['max_output_tokens']} Token；Token 上界未严格验证，¥1 是预算目标而非实际账单硬保证。同一实验最多一次请求，失败或超时也不自动重试。")
@@ -97,21 +100,43 @@ def main():
     if result:
         if result["mode"] == "research":
             st.markdown(result["report"])
-            if "estimated_cny" in result:
-                usage = result["usage"]
-                st.caption(f"本轮 Qwen · 输入 {usage['prompt_tokens']} / 输出 {usage['completion_tokens']} Token · 按配置单价估算 ¥{result['estimated_cny']}。")
             if result.get("status", "completed") != "completed":
-                st.warning("分析未完整完成。请查看报告中的来源、失败记录和运行状态。")
+                st.warning("分析未完整完成。前面已完成的批次仍保留。每条评论的结果和未完成原因见技术详情。")
+            if "estimated_cny" in result:
+                st.caption(f"本轮 Qwen 估算费用 ¥{result['estimated_cny']}。")
+            elif result.get("status") == "request_failed" and result.get("api_calls"):
+                known = result.get("known_cost_cny")
+                label = f"已返回用量的批次估算 ¥{known}。" if known is not None else ""
+                st.caption(label + "请求失败批次的费用未知，已保留账本预留。请以百炼账单为准。")
         else:
             st.warning(result["reason"])
         batch = result["batch"]
         st.caption(f"本轮获取：{batch['searched_videos']} 个搜索结果，{batch['videos_with_comments']} 个有评论视频，{batch['comment_count']} 条去重评论。")
         audit = result.get("audit") or inspect_collection(batch)["audit"]
-        st.caption(f"字段核验：实际 {audit['received_comments']} 条，标准 JSON 有效记录 {audit['valid_records']} 条，异常 {len(audit['issues'])} 项。brand=unknown 表示尚未确认品牌，证据质量尚未评估。")
-        st.caption("最近月份仅筛选视频发布时间；评论按最新顺序读取最多十条，不保证覆盖该时间段所有评论。")
         if audit["issues"]:
-            st.warning("部分来源字段缺失或不一致；以下仅显示字段诊断，不进行分析。")
-            st.dataframe(audit["issues"], hide_index=True)
+            st.warning("部分来源字段缺失或不一致，本轮分析未启动。")
+        with st.expander("Advanced Details · 技术详情"):
+            st.caption(f"实际 {audit['received_comments']} 条，标准 JSON 有效记录 {audit['valid_records']} 条，异常 {len(audit['issues'])} 项。")
+            st.caption("时间筛选针对视频发布时间。每个视频仅获取第一页公开顶层评论。")
+            if audit["issues"]:
+                st.dataframe(audit["issues"], hide_index=True)
+            if "selection" in result:
+                st.caption(f"模型 {result['model']} · Schema {result['schema_version']} · Qwen 请求 {result['api_calls']} 次 · 运行状态 {result['status']}")
+                st.json(result["usage"])
+                outcomes = result.get("outcomes", {})
+                st.dataframe([{**row, "分析结果": outcomes.get(row["review_id"], "")}
+                              for row in result["selection"]], hide_index=True)
+                if result.get("batch_runs"):
+                    st.caption(f"预算账本运行编号 {result['run_id']}")
+                    st.json(result["batch_runs"])
+                st.json([{"review_id": row["review_id"], "status": row["processing"]["status"],
+                          "normalizations": row["processing"]["normalizations"],
+                          "claims": row["processing"]["claim_quality"], "spans": row["processing"].get("evidence_spans", []),
+                          "issues": row["processing"]["issues"]} for row in result["results"]])
+                if result["failures"]:
+                    st.json(result["failures"])
+                if result["responses"]:
+                    st.json(result["responses"])
         with st.expander("查看各视频原始来源和只读评论"):
             for index, row in enumerate(batch["videos"], 1):
                 st.subheader(f"{index}. {row['video']['title']}")

@@ -167,14 +167,6 @@ def classify_qwen(review, settings, model, *, research=False, automatic=None):
         from consumer_needs import RESEARCH_PROMPT, require_synthetic
         require_synthetic(review)
         prompt += "\nFor this opt-in request, wrap the classification:\n" + RESEARCH_PROMPT
-    api_key = settings.get("DASHSCOPE_API_KEY") or settings.get("QWEN_API_KEY")
-    if not api_key or any(character.isspace() for character in api_key):
-        raise ClassificationError("Set DASHSCOPE_API_KEY in Agent/.env or the process environment.", stop_batch=True)
-    base_url = settings.get("DASHSCOPE_BASE_URL", BEIJING_BASE_URL).rstrip("/")
-    if base_url != BEIJING_BASE_URL and not re.fullmatch(
-        r"https://[A-Za-z0-9-]+\.cn-beijing\.maas\.aliyuncs\.com/compatible-mode/v1", base_url
-    ):
-        raise ClassificationError("Only Alibaba Cloud Beijing endpoints are supported.", stop_batch=True)
     payload = {
         "model": model,
         "messages": [
@@ -187,30 +179,7 @@ def classify_qwen(review, settings, model, *, research=False, automatic=None):
         "max_tokens": automatic.check()["max_output_tokens"] if automatic is not None else 3000 if research else 1000,
         "stream": False,
     }
-    if automatic is not None:
-        if base_url != policy["api_base_url"]:
-            raise ControlError("Endpoint does not match the verified server configuration.")
-        automatic.reserve(payload)
-    http_request = request.Request(
-        base_url + "/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with request.build_opener(NoRedirect()).open(http_request, timeout=60) as response:
-            body = json.load(response)
-    except error.HTTPError as failure:
-        status = failure.code
-        failure.close()
-        raise ClassificationError(
-            f"Qwen HTTP {status}; batch stopped. Check regional key/model permissions, quota or settings. No automatic retry.",
-            stop_batch=True,
-        ) from None
-    except (error.URLError, TimeoutError, OSError, HTTPException):
-        raise ClassificationError("Qwen connection failed or timed out. Batch stopped; no automatic retry. Check billing before rerunning.", stop_batch=True) from None
-    except (ValueError, UnicodeError):
-        raise ClassificationError("Qwen returned invalid JSON; output was not saved.") from None
+    body = _send_qwen(payload, settings, automatic=automatic)
     usage = extract_usage(body)
     raw_model_text = None
     try:
@@ -250,6 +219,48 @@ def classify_qwen(review, settings, model, *, research=False, automatic=None):
         if automatic is not None:
             failure.raw_model_text = raw_model_text
         raise failure from None
+
+
+def _send_qwen(payload, settings, *, automatic=None):
+    """Shared Beijing JSON transport, with server-side reservation before a live request."""
+    api_key = settings.get("DASHSCOPE_API_KEY") or settings.get("QWEN_API_KEY")
+    if not api_key or any(character.isspace() for character in api_key):
+        raise ClassificationError("Set DASHSCOPE_API_KEY in Agent/.env or the process environment.", stop_batch=True)
+    base_url = settings.get("DASHSCOPE_BASE_URL", BEIJING_BASE_URL).rstrip("/")
+    if base_url != BEIJING_BASE_URL and not re.fullmatch(
+        r"https://[A-Za-z0-9-]+\.cn-beijing\.maas\.aliyuncs\.com/compatible-mode/v1", base_url
+    ):
+        raise ClassificationError("Only Alibaba Cloud Beijing endpoints are supported.", stop_batch=True)
+    if automatic is not None:
+        if base_url != automatic.check()["api_base_url"]:
+            from analysis_control import ControlError
+            raise ControlError("Endpoint does not match the verified server configuration.")
+        automatic.reserve(payload)
+    http_request = request.Request(
+        base_url + "/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Authorization": "Bearer " + api_key, "Content-Type": "application/json"},
+        method="POST",
+    )
+    stage = "open"
+    try:
+        with request.build_opener(NoRedirect()).open(http_request, timeout=60) as response:
+            stage = "read"
+            body = json.load(response)
+    except error.HTTPError as failure:
+        status = failure.code
+        failure.close()
+        raise ClassificationError(
+            f"Qwen HTTP {status}; batch stopped. Check regional key/model permissions, quota or settings. No automatic retry.",
+            stop_batch=True,
+        ) from None
+    except (error.URLError, TimeoutError, OSError, HTTPException) as failure:
+        from youtube_comments import network_failure_message
+        detail = network_failure_message(failure, stage)
+        raise ClassificationError(f"Qwen connection failed or timed out. {detail} No automatic retry. Check billing before rerunning.", stop_batch=True) from None
+    except (ValueError, UnicodeError):
+        raise ClassificationError("Qwen returned invalid JSON; output was not saved.") from None
+    return body
 
 
 def classify_mock(review, fixtures):
