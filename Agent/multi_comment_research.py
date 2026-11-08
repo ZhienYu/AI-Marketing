@@ -508,7 +508,7 @@ def render_consumer_report(query, state, formal):
                     evidence += groups["experience"].get(topic, [])
                 axes = {}
                 for entry in evidence:
-                    measures = research_axes(" ".join(entry[3]))
+                    measures = research_axes(" ".join(entry[3]), topic=topic)
                     if measures:
                         axes.setdefault(tuple(measures), []).append(entry)
                     elif topic in VALIDATION:

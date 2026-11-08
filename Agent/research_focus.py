@@ -41,15 +41,23 @@ HEALTH_READING = re.compile(
     r"|\d+\s*%.{0,32}(?:battery health|life battery|电池健康)", re.I
 )
 RUNTIME_MEASURE = re.compile(r"\b(?:\d+\s*(?:hr|hrs|hours?|menit|jam)|screen.on time)\b|\d+\s*小时", re.I)
+# A denominator such as m³/hr, km per hour or cycles/hour is not a duration.
+RATE_TIME = re.compile(r"(?:/|\bper\s+)\s*(?:h|hrs?|hours?|minutes?|min|seconds?|sec)\b", re.I)
 RESEARCH_AXES = (
-    (r"\b(?:capacity|[\d.,]+\s*mah|larger batter(?:y|ies)|baterai jumbo)\b|电池容量", "电池容量"),
-    (r"\b(?:fast(?:er)? charg\w*|\d+(?:\s*[-–]\s*\d+)?\s*w(?:atts?)?)\b|充电速度", "充电速度"),
-    (r"\b(?:thin\w*|lightweight|weight|tipis|ringan)\b|轻薄|重量", "机身厚度或重量"),
-    (r"\b(?:all day|full day|hours?|runtime|hr|hours? of)\b|全天|小时", "指定使用场景下的持续时间"),
-    (r"\b(?:comfort\w*|pressure|fit|ear tips)\b|佩戴|压耳", "连续使用后的舒适度与贴合度"),
-    (r"\b(?:cancel\w*|renew\w*|refund|billing)\b|取消|续订|扣费", "取消或续订的步骤与实际扣费"),
-    (r"\b(?:filter\w*|debris|suction|dirt)\b|滤网|过滤|清洁", "不同污物条件下的清洁效果"),
+    (r"\b(?:battery capacity|[\d.,]+\s*mah|larger batter(?:y|ies)|baterai jumbo)\b|电池容量", "电池容量"),
+    (r"\b(?:fast(?:er)? charg\w*|charging (?:speed|time))\b|充电速度", "充电速度"),
+    (r"\b(?:thin(?:ner|nest)?|thickness|lightweight|(?:device|unit|phone|product) weight|tipis|ringan)\b|轻薄|机身重量", "机身厚度或重量"),
+    (r"\b(?:all day|full day|runtime|\d+(?:\.\d+)?\s*(?:h|hrs?|hours?)|hours? of)\b|全天|小时", "指定使用场景下的持续时间"),
+    (r"\b(?:comfort(?:able|ably)?|ear tips|(?:fit|fits) (?:snugly|comfortably))\b|佩戴|压耳", "连续使用后的舒适度与贴合度"),
+    (r"\b(?:cancel(?:ling|ing|lation)? (?:my |the |a )?(?:subscription|plan|trial)|(?:subscription|plan|trial) cancellation|renewal|billing)\b|取消订阅|续订|扣费", "取消或续订的步骤与实际扣费"),
+    (r"\b(?:debris|suction|dust removal|remov\w* dust|filter (?:debris|dust|particles))\b|滤网|过滤颗粒|除尘", "不同污物条件下的清洁效果"),
 )
+TOPIC_AXES = {
+    "续航与充电": {"电池容量", "充电速度", "机身厚度或重量", "指定使用场景下的持续时间"},
+    "佩戴与人体工学": {"连续使用后的舒适度与贴合度", "机身厚度或重量"},
+    "交付与订阅流程": {"取消或续订的步骤与实际扣费"},
+    "清洁效果": {"不同污物条件下的清洁效果"},
+}
 
 
 def focus_for(query):
@@ -67,5 +75,10 @@ def direct_wish(source):
                                    r"|\bto (?:know|learn|find out)\b|^[\"“]", text, re.I)))
 
 
-def research_axes(source):
-    return [axis for pattern, axis in RESEARCH_AXES if re.search(pattern, source, re.I)]
+def research_axes(source, *, topic=None):
+    if topic is not None:
+        allowed = TOPIC_AXES.get(topic, set())
+    else:
+        allowed = {axis for _, axis in RESEARCH_AXES}
+    text = RATE_TIME.sub(" ", source)
+    return [axis for pattern, axis in RESEARCH_AXES if axis in allowed and re.search(pattern, text, re.I)]
