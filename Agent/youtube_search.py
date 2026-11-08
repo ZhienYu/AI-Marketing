@@ -15,6 +15,7 @@ from youtube_comments import (
 AGENT_DIR = Path(__file__).resolve().parent
 SEARCH_ENDPOINT = "https://www.googleapis.com/youtube/v3/search"
 MAX_VIDEOS = 5
+MAX_PILOT_VIDEOS = 20
 DEFAULT_QUERY = "Robotic Pool Cleaner"
 
 
@@ -27,13 +28,15 @@ def validate_query(query):
     return query
 
 
-def normalize_videos(payload, *, synthetic=False, deduplicate=False):
+def normalize_videos(payload, *, synthetic=False, deduplicate=False, limit=MAX_VIDEOS):
+    if limit not in (MAX_VIDEOS, MAX_PILOT_VIDEOS):
+        raise YouTubeReadError("Unsupported video limit.")
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
         raise YouTubeReadError("YouTube search response has invalid structure. No automatic retry.")
     videos = []
     seen = set()
     try:
-        for item in payload["items"][:MAX_VIDEOS]:
+        for item in payload["items"][:limit]:
             identity = item["id"]
             snippet = item["snippet"]
             video_id = identity["videoId"]
@@ -49,6 +52,7 @@ def normalize_videos(payload, *, synthetic=False, deduplicate=False):
             seen.add(video_id)
             videos.append({
                 "title": title, "channel_title": channel_title, "published_at": published_at,
+                **({"channel_id": snippet.get("channelId", "")} if limit == MAX_PILOT_VIDEOS else {}),
                 "video_id": video_id,
                 "video_url": "https://www.youtube.com/watch?" + parse.urlencode({"v": video_id}),
                 "source_platform": "youtube", "is_synthetic": synthetic,
@@ -58,19 +62,25 @@ def normalize_videos(payload, *, synthetic=False, deduplicate=False):
     return videos
 
 
-def search_videos(query, api_key, *, published_after=None, deduplicate=False):
+def search_videos(query, api_key, *, published_after=None, deduplicate=False, limit=MAX_VIDEOS):
+    if limit not in (MAX_VIDEOS, MAX_PILOT_VIDEOS):
+        raise YouTubeReadError("Unsupported video limit; no request was sent.")
     query = validate_query(query)
     parameters = {
         "part": "snippet", "type": "video", "q": query, "order": "relevance",
-        "maxResults": MAX_VIDEOS,
+        "maxResults": limit,
         "fields": "items(id(kind,videoId),snippet(title,channelTitle,publishedAt))",
         "key": api_key,
     }
+    if limit == MAX_PILOT_VIDEOS:
+        parameters["fields"] = "items(id(kind,videoId),snippet(title,channelId,channelTitle,publishedAt))"
     if published_after is not None:
         parameters["publishedAfter"] = published_after
     api_request = request.Request(SEARCH_ENDPOINT + "?" + parse.urlencode(parameters), headers={"Accept": "application/json"}, method="GET")
     payload = request_json(api_request, operation="search")
-    return normalize_videos(payload, deduplicate=True) if deduplicate else normalize_videos(payload)
+    if limit == MAX_VIDEOS:
+        return normalize_videos(payload, deduplicate=True) if deduplicate else normalize_videos(payload)
+    return normalize_videos(payload, deduplicate=deduplicate, limit=limit)
 
 
 def main(argv=None):

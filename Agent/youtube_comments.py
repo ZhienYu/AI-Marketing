@@ -17,6 +17,7 @@ from urllib import error, parse, request
 AGENT_DIR = Path(__file__).resolve().parent
 ENDPOINT = "https://www.googleapis.com/youtube/v3/commentThreads"
 MAX_COMMENTS = 10
+MAX_PILOT_COMMENTS = 50
 MAX_PREVIEW = 3
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_REQUEST_ATTEMPTS = 2
@@ -94,13 +95,15 @@ class NoRedirect(request.HTTPRedirectHandler):
         raise YouTubeReadError("Unexpected redirect refused. No retry; the API key was not forwarded.")
 
 
-def normalize_comments(payload, video_id, *, synthetic=False, deduplicate=False):
+def normalize_comments(payload, video_id, *, synthetic=False, deduplicate=False, limit=MAX_COMMENTS):
+    if limit not in (MAX_COMMENTS, MAX_PILOT_COMMENTS):
+        raise YouTubeReadError("Unsupported comment limit.")
     if not isinstance(payload, dict) or not isinstance(payload.get("items"), list):
         raise YouTubeReadError("YouTube response has invalid structure; no results were saved.")
     comments = []
     seen = set()
     try:
-        for item in payload["items"][:MAX_COMMENTS]:
+        for item in payload["items"][:limit]:
             thread = item["snippet"]
             top_level = thread["topLevelComment"]
             snippet = top_level["snippet"]
@@ -281,18 +284,25 @@ def request_json(api_request, *, operation):
         time.sleep(RETRY_DELAY_SECONDS)
 
 
-def fetch_comments(video_id, api_key, *, deduplicate=False):
+def fetch_comments(video_id, api_key, *, deduplicate=False, limit=MAX_COMMENTS, audit=None):
+    if limit not in (MAX_COMMENTS, MAX_PILOT_COMMENTS):
+        raise YouTubeReadError("Unsupported comment limit; no request was sent.")
     if not VIDEO_ID_PATTERN.fullmatch(video_id):
         raise YouTubeReadError("Invalid video ID; no request was sent.")
     parameters = {
-        "part": "snippet", "videoId": video_id, "maxResults": MAX_COMMENTS,
+        "part": "snippet", "videoId": video_id, "maxResults": limit,
         "textFormat": "plainText", "order": "time",
         "fields": "items(snippet(videoId,topLevelComment(id,snippet(textDisplay,publishedAt))))",
         "key": api_key,
     }
     api_request = request.Request(ENDPOINT + "?" + parse.urlencode(parameters), headers={"Accept": "application/json"}, method="GET")
     payload = request_json(api_request, operation="comments")
-    return normalize_comments(payload, video_id, deduplicate=True) if deduplicate else normalize_comments(payload, video_id)
+    if limit == MAX_COMMENTS:
+        return normalize_comments(payload, video_id, deduplicate=True) if deduplicate else normalize_comments(payload, video_id)
+    comments = normalize_comments(payload, video_id, deduplicate=deduplicate, limit=limit)
+    if audit is not None:
+        audit["received"] = min(len(payload["items"]), limit)
+    return comments
 
 
 def preview_text(value):

@@ -1,16 +1,19 @@
 """Map checked batch results to the visual report without further model calls."""
 
 from collections import Counter, defaultdict
+from dataclasses import replace
 import re
 
 from business_purchase_signals import CONSUMABLE_COST, purchase_choice, purchase_constraints
+from business_evidence_cards import REPLACES, RESEARCH, observation_card
+from business_research_presentation import describe_evidence, upgrade_phase_k
 from business_report_view import BusinessReportView, CommentSource, ReportCoverage, ReportItem
 from commercial_insights import competitor_evidence
 from multi_comment_research import (
     CONTENT_OR_IMAGINED, GENERAL_TOPICS, LINK, MEDIA_ONLY, PROMOTION, TOPICS, VIDEO_LINK,
     evidence_spans, group_themes, supports_purchase_inquiry,
 )
-from report_evidence import GENERAL_COMPLAINT, literal_claims
+from report_evidence import GENERAL_COMPLAINT, MONEY, independent_claims, literal_claims
 from research_focus import FACETS, focus_for, matching_focus, research_axes
 
 
@@ -148,6 +151,19 @@ def _literal_card(claim, ref):
     )
 
 
+def _phase_k_groups(items, *, by_topic=False):
+    groups = {}
+    for item in items:
+        # Keep prices, named entities, roles and actions separate. Broad themes
+        # can share a card, with one example and every supporting source.
+        detail = "" if by_topic and item.detail.startswith("原文示例") else item.detail
+        key = (item.title, item.badge, item.business_meaning, detail)
+        prior = groups.get(key)
+        groups[key] = item if prior is None else replace(
+            prior, sources=tuple(dict.fromkeys(prior.sources + item.sources)))
+    return sorted(groups.values(), key=lambda item: -len(item.sources))
+
+
 def build_business_view(query, state, formal, collected, *, diagnostics=None):
     # Only returned and usable items can contribute. A budget stop or missing
     # result never converts a selected raw comment into an analysis finding.
@@ -190,8 +206,52 @@ def build_business_view(query, state, formal, collected, *, diagnostics=None):
     rows = {r["review_id"]: r for r in checked + rechecked}
     for key, (row, _) in literal.items():
         rows.setdefault(key, row)
-    refs = {review_id: f"S{index:02d}" for index, review_id in enumerate(rows, 1)}
     category = _category_pattern(query, focus)
+
+    def generic_product(name):
+        return (name.casefold() in {"unknown", "model", "device", "product", "this one"}
+                or bool(category and category.fullmatch(name))
+                or bool(re.fullmatch(MONEY + r"\s+\w+", name, re.I)))
+
+    original_rows = {row["review_id"]: row for row in collected}
+    independently_checked = [(row, row["processing"]) for row in checked]
+    for failure in state.get("failures", []):
+        processed = failure.get("processing", {})
+        raw = processed.get("raw")
+        row = original_rows.get(failure.get("review_id"))
+        if (row and isinstance(raw, dict) and processed.get("evidence_spans")
+                and not any(label.get("type") in {"Irrelevant", "Unclear"} for label in raw.get("feedback_types", []))
+                and any(issue.get("reason") in {"Entity lacks original attribution evidence.",
+                                               "No supported feedback category remains."}
+                        for issue in processed.get("issues", []))):
+            independently_checked.append((row, processed))
+    independent = {}
+    for row, processed in independently_checked:
+        text = row["review_text"]
+        if (MEDIA_ONLY.fullmatch(text) or VIDEO_LINK.search(text)
+                or (LINK.search(text) and PROMOTION.search(text))
+                or (focus and not matching_focus(focus, text))):
+            continue
+        spans = processed["evidence_spans"]
+        if not all(text[span["start"]:span["end"]] == span["text"] for span in spans):
+            continue
+        spans = [span for span in spans if not _skip_source(span["text"])]
+        raw = processed["raw"]
+        entity = raw.get("product_model", {})
+        brand = raw.get("brand", {}).get("name", "unknown")
+        cited = " ".join(span["text"] for span in spans if span["id"] in entity.get("evidence_ids", []))
+        name = entity.get("name", "unknown")
+        combined_name = f"{brand} {name}"
+        if combined_name.casefold() in cited.casefold():
+            name = combined_name
+        if generic_product(name) or not re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", cited, re.I):
+            name = ""
+        if claims := independent_claims(spans, name):
+            key = row["review_id"]
+            independent[key] = tuple(claim for claim in claims if not any(generic_product(n) for n in claim.names))
+            if independent[key]:
+                rows.setdefault(key, row)
+    refs = {review_id: f"S{index:02d}" for index, review_id in enumerate(rows, 1)}
     product_audit = []
     opportunity_audit = Counter()
     supported_opportunities = set()
@@ -281,7 +341,7 @@ def build_business_view(query, state, formal, collected, *, diagnostics=None):
                     claims = row["processing"]["claim_quality"]
                     supported_entity = any(c["path"] == ["product_model"] and c["status"] == "Supported"
                                            and set(c["evidence_ids"]) & set(evidence_ids) for c in claims)
-                    if supported_entity and entity.casefold() != "unknown" and entity.casefold() in quote.casefold():
+                    if supported_entity and not generic_product(entity) and entity.casefold() in quote.casefold():
                         name = f"{brand} {entity}" if brand.casefold() != "unknown" else entity
                         if name.casefold() not in quote.casefold():
                             name = entity
@@ -363,10 +423,40 @@ def build_business_view(query, state, formal, collected, *, diagnostics=None):
                 rows[key] = row
             buckets["purchase", "型号选择咨询", "原文选购咨询 · 品类待确认"].append((refs[key], (quote,)))
             break
+    observation_cards = []
+    for key, claims in independent.items():
+        ref = refs.get(key)
+        if not ref:
+            continue
+        for claim in claims:
+            observation_cards.append((claim.kind, *observation_card(claim, ref)))
+            for topic in REPLACES.get(claim.kind, ()):
+                themes[topic].discard(ref)
+                for (_, bucket_topic, badge), entries in buckets.items():
+                    if bucket_topic == topic and badge != "正式统计支持的反馈":
+                        entries[:] = [(source, quotes) for source, quotes in entries if source != ref]
+
     cards = defaultdict(list)
     for (section, topic, kind), entries in buckets.items():
         if not entries:
             continue
+        if state.get("phase_k"):
+            descriptions = defaultdict(list)
+            unresolved = []
+            for ref, quotes in entries:
+                specific = describe_evidence(topic, kind, " ".join(quotes))
+                if specific is None:
+                    unresolved.append((ref, quotes))
+                else:
+                    descriptions[specific].append(ref)
+                    themes[specific[0]].add(ref)
+                    if specific[0] != topic:
+                        themes[topic].discard(ref)
+            cards[section].extend(ReportItem(title, detail, tuple(dict.fromkeys(source_refs)), kind)
+                                  for (title, detail), source_refs in descriptions.items())
+            entries = unresolved
+            if not entries:
+                continue
         source_refs = tuple(dict.fromkeys(ref for ref, _ in entries))
         # A single representative excerpt provides specificity. Full quotes,
         # other perspectives and video links remain under evidence navigation.
@@ -407,9 +497,17 @@ def build_business_view(query, state, formal, collected, *, diagnostics=None):
                     theme = "除尘需求" if claim.kind in {"dust_budget", "dust_request"} else item.title
                     themes[theme].add(ref)
 
+    for kind, section, item in observation_cards:
+        if section == "competitors":
+            literal_products.append(item)
+        else:
+            cards[section].append(item)
+        if kind != "listening_context":
+            theme = {"priced_choice": "型号选择", "subjective_comparison": "个人使用比较"}.get(kind, item.title)
+            themes[theme].update(item.sources)
+
     def product_scope(row, source, name, role, before, after):
-        generic = re.sub(r"[^\w]+", " ", name.casefold()).strip()
-        if generic in {"air purifier", "purifier", "air purifiers", "model", "device", "product"}:
+        if generic_product(name):
             return False
         # A nearby category noun must describe the named product itself.
         # Video titles and model name recognition cannot establish category.
@@ -548,13 +646,39 @@ def build_business_view(query, state, formal, collected, *, diagnostics=None):
         diagnostics.update(product_scope_exclusions=product_audit,
                            opportunities=dict(opportunity_audit), model_opportunities_displayed=sum(
                                item.badge.startswith("AI 假设") for item in opportunities),
-                           source_research_direction=any(not item.badge.startswith("AI 假设") for item in opportunities),
                            literal_choice_comments=len(choices),
                            model_scope_exclusions=len(returned) - len(checked))
-    topic_items = tuple(ReportItem(topic, "", tuple(sorted(sources))) for topic, sources in
-                        sorted(themes.items(), key=lambda pair: (-len(pair[1]), pair[0]))[:8])
+    if state.get("phase_k"):
+        research_sources = defaultdict(list)
+        for kind, _, item in observation_cards:
+            if kind in RESEARCH:
+                research_sources[kind].extend(item.sources)
+        research = sorted(research_sources.items(), key=lambda pair: -len(set(pair[1])))
+        for kind, references in research:
+            title, detail = RESEARCH[kind]
+            sources = tuple(dict.fromkeys(references))
+            badge = "多条评论支持 · 待验证" if len(sources) > 1 else "单条来源 · 探索性机会"
+            opportunities.append(ReportItem(title, detail, sources, badge))
+        opportunities = _phase_k_groups(opportunities)[:6]
+        for section in ("needs", "experience", "purchase", "preferences"):
+            cards[section] = _phase_k_groups(cards[section], by_topic=section != "purchase")
+        competitors = _phase_k_groups(competitors)
+    existing_directions = {item.title for item in opportunities}
+    for kind, _, item in observation_cards:
+        if state.get("phase_k") or kind not in RESEARCH or len(opportunities) >= 3:
+            continue
+        title, detail = RESEARCH[kind]
+        if title not in existing_directions:
+            opportunities.append(ReportItem(title, detail, item.sources, "单条来源 · 探索性机会"))
+            existing_directions.add(title)
+    if diagnostics is not None:
+        diagnostics["source_research_direction"] = any(not item.badge.startswith("AI 假设") for item in opportunities)
     primary = cards["needs"] + cards["experience"] + cards["purchase"] + cards["preferences"]
     displayed = {ref for item in primary + competitors + opportunities for ref in item.sources}
+    all_topics = tuple(ReportItem(topic, "", tuple(sorted(sources))) for topic, sources in
+                       sorted(((key, refs & displayed) for key, refs in themes.items() if refs & displayed),
+                              key=lambda pair: (-len(pair[1]), pair[0])))
+    topic_items = all_topics[:8]
     formal_ids = {r["review_id"] for r in formal if r["product_aspects"]}
     source_items = tuple(CommentSource(
         refs[key], row["video_id"], row["comment_id"], row["review_text"], row["published_at"],
@@ -588,6 +712,22 @@ def build_business_view(query, state, formal, collected, *, diagnostics=None):
             summary.append(ReportItem(*synthesis, item.sources, "样本观察"))
             if len(summary) == 4:
                 break
+    for kind, _, item in sorted(observation_cards, key=lambda entry: entry[0] not in RESEARCH):
+        if len(summary) >= 4:
+            break
+        if not item.business_meaning or any(set(item.sources) & set(prior.sources) for prior in summary):
+            continue
+        if kind == "priced_choice":
+            context = next((other.detail for tag, _, other in observation_cards
+                            if tag == "listening_context" and other.sources == item.sources), "")
+            if context:
+                summary.append(ReportItem(
+                    "两款耳机报价不同，买家描述了自己的听歌场景",
+                    item.detail + context + "选购比较可以围绕这类日常听歌场景展开。",
+                    item.sources, "样本观察",
+                ))
+                continue
+        summary.append(ReportItem(item.title, item.detail + item.business_meaning, item.sources, "样本观察"))
     summary_sources = {ref for item in summary for ref in item.sources}
     for item in sorted(primary, key=lambda item: -len(item.sources)):
         if len(summary) >= 4 or item.title not in SUMMARY_FINDINGS or not set(item.sources) - summary_sources:
@@ -597,7 +737,7 @@ def build_business_view(query, state, formal, collected, *, diagnostics=None):
         summary_sources.update(item.sources)
         if len(summary) == 4:
             break
-    return BusinessReportView(
+    view = BusinessReportView(
         query, False, source_items, summary=tuple(summary), topics=topic_items,
         needs=tuple(cards["needs"] + cards["experience"] + cards["preferences"]),
         purchase=tuple(cards["purchase"]), competitors=tuple(competitors), opportunities=tuple(opportunities),
@@ -609,3 +749,4 @@ def build_business_view(query, state, formal, collected, *, diagnostics=None):
             "每项按去重评论 ID 计数。同一条评论可支持多个主题，本次样本不代表市场趋势。",
         ),
     )
+    return upgrade_phase_k(view, all_topics) if state.get("phase_k") else view

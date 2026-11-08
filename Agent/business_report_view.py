@@ -38,6 +38,12 @@ class ReportItem:
 
 
 @dataclass(frozen=True)
+class ReportTopic:
+    parent: ReportItem
+    children: tuple[ReportItem, ...]
+
+
+@dataclass(frozen=True)
 class ReportCoverage:
     collected: int
     submitted: int
@@ -59,6 +65,10 @@ class BusinessReportView:
     opportunities: tuple[ReportItem, ...] = ()
     limitations: tuple[str, ...] = ()
     coverage: ReportCoverage | None = None
+    research_layout: bool = False
+    topic_groups: tuple[ReportTopic, ...] = ()
+    scenarios: tuple[ReportItem, ...] = ()
+    information_types: tuple[ReportItem, ...] = ()
 
     def __post_init__(self):
         source_labels = {source.label for source in self.sources}
@@ -70,9 +80,13 @@ class BusinessReportView:
         usable = source_labels if self.demo else {
             source.label for source in self.sources if source.analysis_status in {"validated", "exploratory"}
         }
+        for topic in self.topic_groups:
+            if set(topic.parent.sources) != {ref for item in topic.children for ref in item.sources}:
+                raise ValueError("Topic count must equal its child source union.")
         for section in (
             self.summary, self.topics, self.needs, self.purchase,
-            self.competitors, self.opportunities,
+            self.competitors, self.opportunities, self.scenarios, self.information_types,
+            tuple(item for group in self.topic_groups for item in (group.parent, *group.children)),
         ):
             for item in section:
                 if not item.sources or not set(item.sources) <= usable:

@@ -27,6 +27,10 @@ BATCH_MAX_CALLS = 3
 BATCH_INPUT = 11000
 BATCH_OUTPUT = 3000
 BATCH_RESERVATION_CNY = Decimal("0.0444")
+PHASE_K = "phase_k"
+PHASE_K_COLLECTION = (20, 50)
+PHASE_K_RUN_SECONDS = 720
+SESSION_SECONDS = 900
 
 
 @dataclass(frozen=True)
@@ -34,6 +38,8 @@ class BatchProfile:
     comments: int
     calls: int
     reservation_cny: Decimal
+    videos: int = 5
+    comments_per_video: int = 10
 
     @property
     def tokens(self):
@@ -43,6 +49,7 @@ class BatchProfile:
 BATCH_PROFILES = {
     "standard": BatchProfile(BATCH_MAX_COMMENTS, BATCH_MAX_CALLS, BATCH_RESERVATION_CNY),
     "pilot15": BatchProfile(15, 4, Decimal("0.0592")),
+    PHASE_K: BatchProfile(80, 20, Decimal("0.2960"), *PHASE_K_COLLECTION),
 }
 
 
@@ -110,6 +117,8 @@ def analysis_readiness(value, purpose):
             getattr(Policy(value), method)(purpose)
             result[name] = {"ready": True, "reason": ""}
         except (ValueError, KeyError, TypeError, ArithmeticError, ControlError):
+            if name == "youtube" and isinstance(value, dict) and value.get("batch_profile") == PHASE_K:
+                reason = "缺少有效的 Phase K 扩容授权记录（20 个视频、每个 50 条、最多分析 80 条）。"
             result[name] = {"ready": False, "reason": reason}
     result["ready"] = all(result[k]["ready"] for k in checks)
     result["collection_enabled"] = True
@@ -133,6 +142,14 @@ class Policy:
                 raise ControlError("Incomplete server-side approval/pricing record.")
         if p.get("source_scope") != "public_videos_any_channel":
             raise ControlError("The current automatic search requires approval covering unrelated public channels.")
+        if p.get("batch_profile") == PHASE_K:
+            scope = p.get("phase_k_scope")
+            if (not isinstance(scope, dict) or scope.get("approved") is not True
+                    or not isinstance(scope.get("approval_reference"), str)
+                    or not scope["approval_reference"].strip()
+                    or (scope.get("videos"), scope.get("comments_per_video")) != PHASE_K_COLLECTION
+                    or scope.get("model_comments") != BATCH_PROFILES[PHASE_K].comments):
+                raise ControlError("No recorded approval for Phase K collection and processing limits.")
         if p.get("approval_validity") == "no_expiry_confirmed" and p.get("expires_at") is None:
             if not p.get("approval_attestation"):
                 raise ControlError("An explicit no-expiry confirmation is required.")
@@ -338,8 +355,13 @@ class Execution:
             rows = db.execute("SELECT day,run,cost,tokens FROM reservations").fetchall()
             run = [r for r in rows if r[1] == self.run_id]
             total = lambda rs: sum((Decimal(r[2]) for r in rs), Decimal(0))
+            daily_used = total(r for r in rows if r[0] == day)
+            if p.get("batch_profile") == PHASE_K and not run:
+                planned = self._planned_batch_count * worst
+                if daily_used + planned > Decimal(str(p["daily_cny_limit"])):
+                    raise ControlError("The UTC daily budget cannot cover the planned run.")
             tokens = p["max_input_tokens"] + p["max_output_tokens"]
-            if len(run) >= p["max_calls"] or sum(r[3] for r in run) + tokens > p["run_token_limit"] or total(run) + worst > Decimal(str(p["run_cny_limit"])) or total(r for r in rows if r[0] == day) + worst > Decimal(str(p["daily_cny_limit"])):
+            if len(run) >= p["max_calls"] or sum(r[3] for r in run) + tokens > p["run_token_limit"] or total(run) + worst > Decimal(str(p["run_cny_limit"])) or daily_used + worst > Decimal(str(p["daily_cny_limit"])):
                 raise ControlError("Request or monetary budget reached; no further request was sent.")
             db.execute("INSERT INTO reservations(day,run,cost,tokens) VALUES(?,?,?,?)", (day, self.run_id, str(worst), tokens))
         return worst

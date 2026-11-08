@@ -6,6 +6,9 @@ import contextlib
 import csv
 import io
 import json
+import re
+from collections import Counter
+from time import monotonic
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,18 +39,46 @@ def video_cutoff(months, now=None):
     return now.replace(year=year, month=month, day=min(now.day, calendar.monthrange(year, month)[1])).isoformat().replace("+00:00", "Z")
 
 
-def multi_video_research(query, *, months=6, live=False, progress=None):
+def _diverse_videos(videos):
+    selected, titles = [], []
+    counts, excluded = Counter(), Counter()
+    for video in videos:
+        channel = video.get("channel_id") or video["channel_title"].casefold().strip()
+        words = set(re.findall(r"[^\W_]+", video["title"].casefold()))
+        if counts[channel] >= 2:
+            excluded["频道上限"] += 1
+            continue
+        if words and any(len(words & previous) / len(words | previous) >= .9 for previous in titles):
+            excluded["标题高度重复"] += 1
+            continue
+        counts[channel] += 1
+        titles.append(words)
+        selected.append(video)
+    return selected, dict(excluded)
+
+
+def multi_video_research(query, *, months=6, live=False, progress=None, phase_k=False, deadline=None):
     """Bounded, sequential official API reads only; never NLP or persistence."""
     if live is not True:
         raise ValueError("Multi-video reads require explicit live=True.")
     query = youtube_search.validate_query(query)
     cutoff = video_cutoff(months)
     key = youtube_comments.load_youtube_key()
-    videos = youtube_search.search_videos(query, key, published_after=cutoff, deduplicate=True)[:5]
+    video_limit, comment_limit = (20, 50) if phase_k else (5, 10)
+    options = {"limit": video_limit} if phase_k else {}
+    videos = youtube_search.search_videos(query, key, published_after=cutoff, deduplicate=True, **options)[:video_limit]
+    searched = len(videos)
+    excluded = {}
+    if phase_k:
+        videos, excluded = _diverse_videos(videos)
     result = {"mode": "live-read-only", "query": query, "published_after": cutoff,
               "collected_at": datetime.now(timezone.utc).isoformat(),
-              "searched_videos": len(videos), "videos": [], "comment_count": 0,
+              "searched_videos": searched, "videos": [], "comment_count": 0,
               "videos_with_comments": 0, "stopped_early": False}
+    if phase_k:
+        result.update(raw_comments_received=0, channel_count=len({
+            v.get("channel_id") or v["channel_title"].casefold().strip() for v in videos}),
+            video_exclusions=excluded, collection_profile="phase_k", time_limited=False)
     seen_videos, seen_comments = set(), set()
     stop = False
     for video in videos:
@@ -58,11 +89,19 @@ def multi_video_research(query, *, months=6, live=False, progress=None):
         seen_videos.add(video["video_id"])
         row = {"video": video, "comments": [], "status": "pending", "failure_reason": None}
         result["videos"].append(row)
+        if phase_k and deadline is not None and monotonic() >= deadline:
+            result["time_limited"] = True
+            row.update(status="not_requested", failure_reason="已达到本轮采集与分析时间上限。")
+            continue
         if stop:
             row.update(status="not_requested", failure_reason="此前出现凭据、权限或配额错误，本视频未请求。")
             continue
         try:
-            comments = youtube_comments.fetch_comments(video["video_id"], key, deduplicate=True)[:10]
+            page = {}
+            options = {"limit": comment_limit, "audit": page} if phase_k else {}
+            comments = youtube_comments.fetch_comments(video["video_id"], key, deduplicate=True, **options)[:comment_limit]
+            if phase_k:
+                result["raw_comments_received"] += page.get("received", len(comments))
             row["collected_at"] = datetime.now(timezone.utc).isoformat()
             for comment in comments:
                 if comment["comment_id"] in seen_comments:

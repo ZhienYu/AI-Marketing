@@ -5,11 +5,12 @@ import json
 from decimal import Decimal
 import uuid
 from datetime import datetime, timezone
+from time import monotonic
 from urllib.parse import urlparse, parse_qs, urlencode
 
 import classify_reviews as classifier
 import orchestrator
-from analysis_control import BATCH_BUDGET_MODE, ControlError, Execution, KEYWORD_BUDGET_MODE, analysis_readiness, message_token_estimate
+from analysis_control import BATCH_BUDGET_MODE, ControlError, Execution, KEYWORD_BUDGET_MODE, PHASE_K, PHASE_K_RUN_SECONDS, analysis_readiness, load_policy, message_token_estimate, with_batch_profile
 from evidence_analysis import PROMPT as LIVE_PROMPT, VERSION as EVIDENCE_VERSION, evidence_message
 from real_analysis_schema import validate as validate_live_output
 
@@ -194,12 +195,20 @@ def start_research(query, purpose, months, *, policy=None, paid_confirmed=False,
         raise ValueError("Invalid research purpose.")
     query = orchestrator.youtube_search.validate_query(query)
     orchestrator.video_cutoff(months)
-    # Analysis gates must never disable official reads or metadata conversion.
-    if progress:
-        progress("collecting", 0, 5)
-    batch = orchestrator.multi_video_research(query, months=months, live=True, progress=progress)
-    collection = inspect_collection(batch)
+    phase_k = isinstance(policy, dict) and policy.get("batch_profile") == PHASE_K
     gates = analysis_readiness(policy, purpose)
+    deadline = None
+    options = {}
+    if phase_k:
+        active = load_policy()
+        if not gates["ready"] or active is None or with_batch_profile(active, PHASE_K) != policy:
+            return {"mode": "blocked", "reason": "Phase K 扩容授权或本机配置尚未通过，未启动采集。"}
+        deadline = monotonic() + PHASE_K_RUN_SECONDS
+        options = {"phase_k": True, "deadline": deadline}
+    if progress:
+        progress("collecting", 0, 20 if phase_k else 5)
+    batch = orchestrator.multi_video_research(query, months=months, live=True, progress=progress, **options)
+    collection = inspect_collection(batch)
     gates["paid_confirmed"] = paid_confirmed is True
     if not gates["ready"] or not gates["paid_confirmed"]:
         reasons = [gates[k]["reason"] for k in ("youtube", "provider", "technical") if not gates[k]["ready"]]
@@ -215,7 +224,7 @@ def start_research(query, purpose, months, *, policy=None, paid_confirmed=False,
         from multi_comment_research import run_batch_research
         try:
             result = run_batch_research(query, reviews, policy, purpose, paid_confirmed=paid_confirmed,
-                                        progress=progress, ledger_path=ledger_path)
+                                        progress=progress, ledger_path=ledger_path, deadline=deadline)
         except ControlError:
             return {"mode": "live-read-only", "batch": batch, **collection, "controls": gates,
                     "report": None, "reason": "分析授权、配置或预算校验未通过。本轮已停止。"}

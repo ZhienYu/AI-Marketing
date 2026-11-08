@@ -1,6 +1,6 @@
 """Bounded comment batches and evidence-linked consumer research synthesis."""
 
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 import copy
 from decimal import Decimal
 from difflib import SequenceMatcher
@@ -9,8 +9,10 @@ import re
 import unicodedata
 import uuid
 
+from time import monotonic
+
 from analysis_control import (
-    BATCH_MAX_COMMENTS, BATCH_PROFILES, BATCH_SIZE, ControlError, Execution, batch_profile, message_token_estimate,
+    BATCH_MAX_COMMENTS, BATCH_PROFILES, BATCH_SIZE, PHASE_K, PHASE_K_RUN_SECONDS, ControlError, Execution, batch_profile, message_token_estimate,
 )
 import classify_reviews as classifier
 from commercial_insights import VALIDATION, render_competitors, source_links
@@ -92,7 +94,10 @@ def select_comments(query, rows, input_limit, *, profile=BATCH_PROFILES["standar
     """A transparent convenience sample. Selection signals are not research findings."""
     query_words = set(re.findall(r"[^\W_]{3,}", query.casefold())) - QUERY_STOP
     focus = focus_for(query)
+    phase_k = profile == BATCH_PROFILES[PHASE_K]
     seen = []
+    exact = set()
+    neighborhoods = defaultdict(lambda: deque(maxlen=6))
     decisions = {}
     priorities = {}
     tiers = defaultdict(lambda: defaultdict(list))
@@ -101,14 +106,22 @@ def select_comments(query, rows, input_limit, *, profile=BATCH_PROFILES["standar
         normalized = " ".join(re.findall(r"\w+", unicodedata.normalize("NFKC", source).casefold()))
         words = set(normalized.split())
         match = matching_focus(focus, source)
-        if MEDIA_ONLY.fullmatch(source) or BARE_COMPARISON.fullmatch(source):
+        tokens = normalized.split() if phase_k else ()
+        keys = (tuple(tokens[:5]), tuple(tokens[-5:])) if len(tokens) >= 10 else ()
+        nearby = (other for key in keys for other in neighborhoods[key]) if phase_k else seen
+        if phase_k and len(source.encode()) > 900:
+            decisions[row["review_id"]] = "完整正文超过单条采样上限"
+        elif MEDIA_ONLY.fullmatch(source) or BARE_COMPARISON.fullmatch(source):
             decisions[row["review_id"]] = "仅视频评价或无上下文数字比较"
         elif focus and not match:
             decisions[row["review_id"]] = "正文未出现研究主题线索"
         elif (len(normalized) < 12 or LOW_SIGNAL.fullmatch(source.strip())) and not supports_purchase_inquiry(source):
             decisions[row["review_id"]] = "信息量不足或仅为互动"
-        elif any(normalized == other or (min(len(normalized), len(other)) >= 80
-                 and SequenceMatcher(None, normalized, other, autojunk=False).ratio() >= .94) for other in seen):
+        elif normalized in exact or any(
+            normalized == other or (min(len(normalized), len(other)) >= 80
+            and SequenceMatcher(None, tokens if phase_k else normalized,
+                                other.split() if phase_k else other, autojunk=False).ratio() >= .94) for other in nearby
+        ):
             decisions[row["review_id"]] = "正文重复或高度相似"
         elif len(source.encode()) > 900 or message_token_estimate(batch_messages([row], query)) > input_limit:
             decisions[row["review_id"]] = "完整正文超过单条采样上限"
@@ -141,14 +154,59 @@ def select_comments(query, rows, input_limit, *, profile=BATCH_PROFILES["standar
                 tier = 0
             else:
                 tier = 2 if score > 1 else 1
-            seen.append(normalized)
-            tiers[tier][row["video_id"]].append((score, row))
+            if phase_k:
+                if tier == 0 or not product or not (use or question or pain or expectation or comparison or
+                    re.search(r"\b(?:love|like|prefer|excellent|works well|reliable)\b|喜欢|好用", source, re.I)):
+                    decisions[row["review_id"]] = "缺少明确反馈，或仅有推广、互动线索"
+                    continue
+                exact.add(normalized)
+                for key in set(keys):
+                    neighborhoods[key].append(normalized)
+                roles = [name for present, name in ((use, "使用"), (pain, "问题"), (question, "选购"),
+                         (comparison, "价格或比较"), (expectation, "期待")) if present]
+                role = roles[-1] if roles else "评价"
+            else:
+                seen.append(normalized)
+                role = ""
+            tiers[tier][row["video_id"]].append((score, row, role))
     ordered = []
     for tier in sorted(tiers, reverse=True):
-        queues = sorted((deque(sorted(items, key=lambda pair: (-pair[0], -min(len(pair[1]["review_text"]), 350))))
-                         for items in tiers[tier].values()), key=lambda queue: -queue[0][0])
+        queues = []
+        for items in tiers[tier].values():
+            ranked = sorted(items, key=lambda pair: (-pair[0], -min(len(pair[1]["review_text"]), 350)))
+            if phase_k:
+                by_role = defaultdict(deque)
+                for item in ranked:
+                    by_role[item[2]].append(item)
+                ranked = []
+                while any(by_role.values()):
+                    ranked.extend(queue.popleft() for queue in by_role.values() if queue)
+            queues.append(deque(ranked))
+        queues.sort(key=lambda queue: -queue[0][0])
         while any(queues):
             ordered.extend(queue.popleft()[1] for queue in queues if queue)
+    if phase_k:
+        batches = []
+        selected = 0
+        for row in ordered:
+            identity = row["review_id"]
+            if selected == profile.comments:
+                decisions[identity] = "本轮样本已满"
+                continue
+            target = next((batch for batch in batches if len(batch) < BATCH_SIZE and
+                           message_token_estimate(batch_messages(batch + [row], query)) <= input_limit), None)
+            if target is None:
+                if len(batches) >= profile.calls:
+                    decisions[identity] = "本轮请求预算已满"
+                    continue
+                target = []
+                batches.append(target)
+            target.append(row)
+            selected += 1
+            decisions[identity] = "入选"
+        return batches, [{"review_id": row["review_id"], "video_id": row["video_id"],
+                          "decision": decisions[row["review_id"]],
+                          "signals": priorities.get(row["review_id"], "")} for row in rows]
     batches = []
     pending = []
     for row in ordered:
@@ -216,7 +274,7 @@ def entity_source_observations(processed, row):
     return {**row, "processing": checked, "source_only": True}
 
 
-def run_batch_research(query, reviews, policy, purpose, *, paid_confirmed, progress=None, ledger_path=None):
+def run_batch_research(query, reviews, policy, purpose, *, paid_confirmed, progress=None, ledger_path=None, deadline=None):
     from automatic_research import validate_sources
     from business_report_live import build_business_view
     from analysis_control import Policy
@@ -226,10 +284,16 @@ def run_batch_research(query, reviews, policy, purpose, *, paid_confirmed, progr
         raise ControlError("Explicit paid confirmation is required.")
     if any(row.get("is_synthetic") is not False or row.get("source_platform") != "youtube" or row.get("text_is_preview") for row in reviews):
         raise ControlError("Only full YouTube source records are accepted.")
-    if len(reviews) > 50 or len({row["review_id"] for row in reviews}) != len(reviews):
+    profile = batch_profile(policy)
+    phase_k = policy.get("batch_profile") == PHASE_K
+    if phase_k and deadline is None:
+        deadline = monotonic() + PHASE_K_RUN_SECONDS
+    if (len(reviews) > profile.videos * profile.comments_per_video
+        or (phase_k and (len({row["video_id"] for row in reviews}) > profile.videos
+            or any(count > profile.comments_per_video for count in Counter(row["video_id"] for row in reviews).values())))
+        or len({row["review_id"] for row in reviews}) != len(reviews)):
         raise ControlError("Invalid source count or duplicate identity.")
     validate_sources(reviews)
-    profile = batch_profile(policy)
     batches, decisions = select_comments(query, reviews, policy["max_input_tokens"], profile=profile)
     plans = [batch_messages(rows, query) for rows in batches]
     selected = [row for rows in batches for row in rows]
@@ -238,7 +302,7 @@ def run_batch_research(query, reviews, policy, purpose, *, paid_confirmed, progr
              "selected": len(selected), "selected_videos": len({r["video_id"] for r in selected}),
              "collected": len(reviews), "selected_sources": selected,
              "submitted": 0, "api_calls": 0, "responses": [], "business_diagnostics": {},
-             "target_comments": profile.comments, "report_outcomes": {},
+             "phase_k": phase_k, "target_comments": profile.comments, "report_outcomes": {},
              "unprocessed": len(selected), "source_observations": [],
              "outcomes": {row["review_id"]: "未发送" for row in selected}, "batch_runs": []}
     if not selected:
@@ -252,8 +316,12 @@ def run_batch_research(query, reviews, policy, purpose, *, paid_confirmed, progr
     settings = classifier.load_local_settings()
     state["run_id"] = execution.run_id
     usage_complete = True
+    all_usage_known = True
     known_usage = defaultdict(int)
     for rows, messages in zip(batches, plans):
+        if deadline is not None and monotonic() >= deadline:
+            state["status"] = "time_limited"
+            break
         review_ids = [row["review_id"] for row in rows]
         attempt = {"batch": len(state["batch_runs"]) + 1, "review_ids": review_ids,
                    "reserved": False, "status": "未发送"}
@@ -273,7 +341,7 @@ def run_batch_research(query, reviews, policy, purpose, *, paid_confirmed, progr
             attempt.update(status="请求失败", reason=str(exc))
             state["failures"].append({"reason": str(exc), "review_ids": review_ids})
             state["status"] = "request_failed"
-            usage_complete = False
+            all_usage_known = False
             break
         finally:
             reserved = execution.reserved_batch_count
@@ -287,6 +355,7 @@ def run_batch_research(query, reviews, policy, purpose, *, paid_confirmed, progr
         for key, value in usage.items():
             state["usage"][key] = state["usage"].get(key, 0) + value
         usage_complete = all(key in usage for key in classifier.TOKEN_FIELDS)
+        all_usage_known &= usage_complete
         if usage_complete:
             for key, value in usage.items():
                 known_usage[key] += value
@@ -298,9 +367,11 @@ def run_batch_research(query, reviews, policy, purpose, *, paid_confirmed, progr
         content = message.get("content") if isinstance(message, dict) else None
         state["responses"].append({"review_ids": [row["review_id"] for row in rows],
                                    "usage": usage, "finish_reason": choice.get("finish_reason"),
-                                   "raw_model_text": content})
+                                   **({} if phase_k else {"raw_model_text": content})})
+        finish = choice.get("finish_reason")
+        allowed_finish = {"stop", "length"} if phase_k else {"stop"}
         if (not usage_complete or body.get("model") != policy["model"]
-            or choice.get("finish_reason") != "stop" or usage["prompt_tokens"] > policy["max_input_tokens"]
+            or finish not in allowed_finish or usage["prompt_tokens"] > policy["max_input_tokens"]
             or usage["completion_tokens"] > policy["max_output_tokens"]):
             state["status"] = "invalid_provider_response"
             attempt["status"] = "模型响应完整性异常"
@@ -309,6 +380,11 @@ def run_batch_research(query, reviews, policy, purpose, *, paid_confirmed, progr
             state["failures"].append({"reason": "模型版本、用量或完整性异常，已停止后续请求",
                                       "review_ids": [row["review_id"] for row in rows]})
             break
+        if finish == "length":
+            attempt["status"] = "批次输出截断"
+            state["outcomes"].update(dict.fromkeys(review_ids, attempt["status"]))
+            state["failures"].append({"stage": "batch_truncated", "review_ids": review_ids})
+            continue
         try:
             response = json.loads(content)
         except (ValueError, TypeError) as exc:
@@ -348,7 +424,7 @@ def run_batch_research(query, reviews, policy, purpose, *, paid_confirmed, progr
         cost = format((known_usage["prompt_tokens"] * Decimal(str(policy["input_cny_per_million"]))
             + known_usage["completion_tokens"] * Decimal(str(policy["output_cny_per_million"]))) / 1_000_000, "f")
         state["known_cost_cny"] = cost
-        if usage_complete:
+        if all_usage_known:
             state["estimated_cny"] = cost
     if progress:
         progress("reporting", state["submitted"], len(selected))
