@@ -314,7 +314,7 @@ class Execution:
         except (OSError, sqlite3.Error):
             raise ControlError("Budget ledger unavailable; no model request was sent.") from None
 
-    def _reserve(self, payload):
+    def _reserve(self, payload, *, expected_run_calls=None):
         p = self.check()
         if (payload.get("model") != p["model"] or payload.get("enable_thinking") is not False
             or payload.get("max_tokens") != p["max_output_tokens"] or payload.get("stream") is not False
@@ -354,10 +354,12 @@ class Execution:
             db.execute("BEGIN IMMEDIATE")
             rows = db.execute("SELECT day,run,cost,tokens FROM reservations").fetchall()
             run = [r for r in rows if r[1] == self.run_id]
+            if expected_run_calls is not None and len(run) != expected_run_calls:
+                raise ControlError("This frozen benchmark attempt was already reserved or is out of order.")
             total = lambda rs: sum((Decimal(r[2]) for r in rs), Decimal(0))
             daily_used = total(r for r in rows if r[0] == day)
-            if p.get("batch_profile") == PHASE_K and not run:
-                planned = self._planned_batch_count * worst
+            if expected_run_calls == 0 or p.get("batch_profile") == PHASE_K and not run:
+                planned = Decimal(str(p["run_cny_limit"])) if expected_run_calls == 0 else self._planned_batch_count * worst
                 if daily_used + planned > Decimal(str(p["daily_cny_limit"])):
                     raise ControlError("The UTC daily budget cannot cover the planned run.")
             tokens = p["max_input_tokens"] + p["max_output_tokens"]
