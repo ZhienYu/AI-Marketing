@@ -22,6 +22,7 @@ PAIR_CUE = re.compile(
 CHOICE_CUE = re.compile(r"\b(?:choosing|deciding|torn|hesitat\w*) (?:between|whether)\b", re.I)
 PREFERENCE_CUE = re.compile(r"\b(?:prefer|compare|compared)\b", re.I)
 ROLE_CUES = (
+    ("已购买", re.compile(r"(?:^\s*|\b(?:I|we) )(?:bought|purchased|ordered) (?:an? |the |my |our )?$", re.I)),
     ("拟购买或考虑", re.compile(r"\b(?:considering|thinking (?:of|about) buying|looking (?:at|to buy)|switch(?:ing)? to|replace (?:it|mine) with|buy(?:ing)?|purchase) (?:an? |the )?$", re.I)),
     ("当前使用", re.compile(r"\b(?:I|we) (?:(?:currently )?use|(?:am|are) (?:currently )?using) (?:my |our |an? |the )?$", re.I)),
     ("本人使用过", re.compile(r"\b(?:I|we) (?:used|tested|tried|wore) (?:my |our |an? |the )?$", re.I)),
@@ -77,12 +78,14 @@ def _role(before, after, context):
     if BUY_AFTER.match(after):
         return "拟购买或考虑"
     for label, cue in ROLE_CUES:
-        if cue.search(before) and (label not in {"当前使用", "本人使用过"} or not ATTRIBUTED.search(context)):
+        if cue.search(before) and (label not in {"当前使用", "本人使用过", "已购买"} or not ATTRIBUTED.search(context)):
             return label
+    if re.search(r"\b(?:what about|how about|thoughts on)\s+(?:the )?$", before, re.I) and after.lstrip().startswith("?"):
+        return "产品咨询"
     return "提及，角色未确认"
 
 
-def competitor_evidence(state, focus, skip_source):
+def competitor_evidence(state, focus, skip_source, *, product_scope=None):
     """Pair only explicit comparisons in one original span. Never assign a fault."""
     mentions, pairs = defaultdict(dict), defaultdict(dict)
     for row in state["results"]:
@@ -97,14 +100,18 @@ def competitor_evidence(state, focus, skip_source):
             if focus and not matching_focus(focus, source):
                 continue
             found = _mentions(source, validated_names[span["id"]])
+            scoped = []
             for i, (start, end, name) in enumerate(found):
                 before = source[found[i-1][1] if i else 0:start]
                 after = source[end:found[i+1][0] if i + 1 < len(found) else len(source)]
                 role = _role(before, after, source)
+                if product_scope is not None and not product_scope(row, source, name, role, before, after):
+                    continue
+                scoped.append((start, end, name))
                 key = name.casefold()
                 # One comment can mention a product in more than one role.
                 mentions[key].setdefault((row["review_id"], role), (name, row["source_url"], source))
-            if len(found) != 2:
+            if len(found) != 2 or len(scoped) != 2:
                 continue
             left, right = found
             between, lead = source[left[1]:right[0]], source[:left[0]]

@@ -4,6 +4,7 @@ import hashlib
 import re
 import sqlite3
 from contextlib import closing
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -26,6 +27,43 @@ BATCH_MAX_CALLS = 3
 BATCH_INPUT = 11000
 BATCH_OUTPUT = 3000
 BATCH_RESERVATION_CNY = Decimal("0.0444")
+
+
+@dataclass(frozen=True)
+class BatchProfile:
+    comments: int
+    calls: int
+    reservation_cny: Decimal
+
+    @property
+    def tokens(self):
+        return self.calls * (BATCH_INPUT + BATCH_OUTPUT)
+
+
+BATCH_PROFILES = {
+    "standard": BatchProfile(BATCH_MAX_COMMENTS, BATCH_MAX_CALLS, BATCH_RESERVATION_CNY),
+    "pilot15": BatchProfile(15, 4, Decimal("0.0592")),
+}
+
+
+def batch_profile(policy):
+    try:
+        return BATCH_PROFILES[policy.get("batch_profile", "standard")]
+    except (KeyError, TypeError):
+        raise ControlError("Unknown batch profile.") from None
+
+
+def with_batch_profile(base, name):
+    """Choose only a server-defined profile over the current standard policy."""
+    if (name not in BATCH_PROFILES or not isinstance(base, dict)
+        or base.get("budget_mode") != BATCH_BUDGET_MODE or base.get("batch_profile", "standard") != "standard"):
+        raise ControlError("A valid standard batch policy is required for the pilot.")
+    Policy(base).check_technical("improvement")
+    if name == "standard":
+        return base
+    profile = BATCH_PROFILES[name]
+    return {**base, "batch_profile": name, "max_calls": profile.calls,
+            "run_token_limit": profile.tokens, "run_cny_limit": str(profile.reservation_cny)}
 
 
 def message_token_estimate(messages):
@@ -128,13 +166,14 @@ class Policy:
         if p.get("budget_mode") == BATCH_BUDGET_MODE:
             from multi_comment_research import BATCH_PROMPT
             from evidence_analysis import VERSION
+            profile = batch_profile(p)
             if (p.get("token_estimate_risk_acknowledged") is not True
                 or p.get("analysis_schema_version") != VERSION
                 or p.get("analysis_prompt_sha256") != hashlib.sha256(BATCH_PROMPT.encode()).hexdigest()
-                or p.get("max_calls") != BATCH_MAX_CALLS or p.get("max_input_tokens") != BATCH_INPUT
+                or p.get("max_calls") != profile.calls or p.get("max_input_tokens") != BATCH_INPUT
                 or p.get("max_output_tokens") != BATCH_OUTPUT
-                or p.get("run_token_limit") != BATCH_MAX_CALLS * (BATCH_INPUT + BATCH_OUTPUT)
-                or Decimal(str(p["run_cny_limit"])) != BATCH_RESERVATION_CNY):
+                or p.get("run_token_limit") != profile.tokens
+                or Decimal(str(p["run_cny_limit"])) != profile.reservation_cny):
                 raise ControlError("Invalid multi-comment request, prompt or budget configuration.")
         elif p.get("token_bound_verified") is not True or p.get("budget_mode") == KEYWORD_BUDGET_MODE:
             # Explicitly risk-accepted single-request experiment, not a verified
@@ -199,13 +238,19 @@ class Execution:
         self.ledger_path = Path(ledger_path)
         self.policy.check(purpose)
         self._batch_lock = Lock()
-        self._remaining_batches = [self._message_digest(messages) for messages in batch_messages]
+        plans = list(batch_messages)
+        self._remaining_batches = [self._message_digest(messages) for messages in plans]
         self._planned_batch_count = len(self._remaining_batches)
-        if policy.get("budget_mode") == BATCH_BUDGET_MODE and (
-            not self._remaining_batches or len(self._remaining_batches) > BATCH_MAX_CALLS
-            or len(set(self._remaining_batches)) != len(self._remaining_batches)
-        ):
-            raise ControlError("Multi-comment execution requires a frozen request plan.")
+        if policy.get("budget_mode") == BATCH_BUDGET_MODE:
+            profile = batch_profile(policy)
+            try:
+                counts = [len(json.loads(messages[1]["content"])["reviews"]) for messages in plans]
+            except (IndexError, KeyError, TypeError, ValueError):
+                raise ControlError("Invalid frozen batch plan.") from None
+            if (not counts or len(counts) > profile.calls or sum(counts) > profile.comments
+                or any(not 1 <= count <= BATCH_SIZE for count in counts)
+                or len(set(self._remaining_batches)) != len(counts)):
+                raise ControlError("Multi-comment execution requires a frozen request plan within the selected profile.")
         if policy.get("budget_mode") == KEYWORD_BUDGET_MODE:
             raise ControlError("Bind the keyword execution to one validated source before making a request.")
         if policy.get("budget_mode") == "single_request_estimate":
@@ -219,6 +264,10 @@ class Execution:
             current = load_policy()
             if current is None or current.get("_config_digest") != p["_config_digest"]:
                 raise ControlError("Server approval configuration changed or was revoked.")
+            if p.get("budget_mode") == BATCH_BUDGET_MODE and (
+                with_batch_profile(current, p.get("batch_profile", "standard")) != p
+            ):
+                raise ControlError("Server batch profile changed or was revoked.")
         return p
 
     @staticmethod
