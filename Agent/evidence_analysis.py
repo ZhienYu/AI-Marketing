@@ -79,7 +79,8 @@ SPECULATIVE_CAUSE = re.compile(r"\b(?:due to|caused by|designed to fail)\b", re.
 FUTURE_OR_WISH = re.compile(r"\b(?:will eventually|i hope|we hope|i wish|we wish)\b", re.I)
 OPTION_QUESTION = re.compile(
     r"\b(?:what do you think|your thoughts)\b[^?]{0,100}\bas (?:an?|the) (?:\w+ )?option\b"
-    r"|\bwould\b[^?]{0,80}\bbe (?:an?|the) (?:\w+ )?option\b", re.I
+    r"|\bwould\b[^?]{0,80}\bbe (?:an?|the) (?:\w+ )?option\b"
+    r"|\bworth\s+(?:paying|spending)\b", re.I
 )
 
 

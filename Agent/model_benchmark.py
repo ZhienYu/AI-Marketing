@@ -1,4 +1,5 @@
 """One authorized, blinded comparison. The production research entry is separate."""
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
@@ -11,7 +12,9 @@ from analysis_control import (
     BATCH_INPUT, BATCH_OUTPUT, ControlError, Execution, LEDGER_PATH, QWEN_MODEL,
     load_policy, message_token_estimate,
 )
+from benchmark_diagnostics import BenchmarkStructureError, parse_benchmark_batch
 from business_report_live import build_business_view
+from business_report_view import BusinessReportView
 from classify_reviews import ClassificationError, TOKEN_FIELDS, _send_qwen, extract_usage, load_local_settings
 from evidence_analysis import VERSION
 from multi_comment_research import BATCH_PROMPT, batch_messages, entity_source_observations, map_response, process_batch_comment
@@ -29,7 +32,7 @@ MANIFEST_SHA256 = "aac387c3192be8ae130bbbc64a1270c5e1bf173e2ee5ca879a2fc71c70fea
 RAW_SCORES = ("supported", "missed", "unsupported", "entity_errors", "role_errors",
               "json_ok", "schema_ok", "missing_items")
 REPORT_SCORES = ("retained", "missed", "unsupported", "misattributed", "duplicates", "traceable",
-                 "specificity", "credibility", "readability")
+                 "postprocess_lost", "literal_recovered", "specificity", "credibility", "readability")
 
 
 def _digest(text):
@@ -148,22 +151,51 @@ class BenchmarkSession:
         self._data.clear()
 
 
-def _report(topic, rows, mapped, execution, model):
+@dataclass(frozen=True)
+class PhaseKReplay:
+    view: BusinessReportView
+    batch_structure_ok: bool
+    # Keyed by the same Rxx labels as the original response. These diagnostics
+    # guide blind review; recovery and loss are scored against individual facts.
+    reviews: dict
+
+
+def replay_phase_k(topic, rows, decoded, *, execution, model):
+    """Evaluate frozen replies without transport, reservations or file writes."""
+    try:
+        mapped = map_response(decoded, rows)
+        structure_ok = True
+    except ValueError:
+        mapped = [(row, None) for row in rows]
+        structure_ok = False
     state = {"purpose": "improvement", "model": model, "schema_version": VERSION,
-             "results": [], "failures": [], "source_observations": [], "submitted": len(rows)}
-    for row, raw in mapped:
+             "results": [], "failures": [], "source_observations": [], "submitted": len(rows),
+             "phase_k": True}
+    reviews = {}
+    for index, (row, raw) in enumerate(mapped, 1):
+        trace = {"validation": "Missing" if structure_ok else "Unmappable",
+                 "claims": (), "entity_rechecked": False}
+        reviews[f"R{index:02}"] = trace
+        if raw is None:
+            continue
         processed = process_batch_comment(raw, row)
+        trace["validation"] = processed["status"]
+        trace["claims"] = tuple(processed["claim_quality"])
         if processed["status"] == "Invalid":
             state["failures"].append({"review_id": row["review_id"], "processing": processed})
-            observation = entity_source_observations(processed, row)
-            if observation:
+            if observation := entity_source_observations(processed, row):
                 state["source_observations"].append(observation)
+                trace["entity_rechecked"] = True
         else:
             analysis = processed["normalized"]
             state["results"].append({**row, "processing": processed, "analysis": analysis,
                                      "brand": analysis["brand"]["name"]})
     formal = render_live_specialist(state, execution=execution, statistics_only=True)
-    return build_business_view(topic, state, formal, rows)
+    view = build_business_view(topic, state, formal, rows)
+    displayed = {source.comment_id: source.label for source in view.sources}
+    for trace, row in zip(reviews.values(), rows):
+        trace["report_source"] = displayed.get(row["comment_id"])
+    return PhaseKReplay(view, structure_ok, reviews)
 
 
 def run_benchmark(batches, *, data_confirmed=False, paid_confirmed=False, workspace_confirmed=False):
@@ -201,24 +233,20 @@ def run_benchmark(batches, *, data_confirmed=False, paid_confirmed=False, worksp
                 content = message.get("content")
                 if (body.get("model") != model or message.get("reasoning_content")
                         or choice.get("finish_reason") != "stop"
-                        or not isinstance(content, str) or set(usage) != set(TOKEN_FIELDS)
+                        or set(usage) != set(TOKEN_FIELDS)
                         or usage["prompt_tokens"] > BATCH_INPUT or usage["completion_tokens"] > BATCH_OUTPUT):
                     raise ControlError("The provider returned a different model, mode or token envelope.")
                 for key in fees[label]:
                     fees[label][key] += usage[key]
-                decoded = json.loads(content)
-                if not isinstance(decoded, dict):
-                    raise ControlError("The provider returned content outside JSON Object mode.")
+                decoded, _ = parse_benchmark_batch(content, rows)
                 raw_outputs[label].append((topic, "stop", content))
-                try:
-                    mapped = map_response(decoded, rows)
-                except ValueError:
-                    mapped = []
-                reports[label].append(_report(topic, rows, mapped, execution, model))
+                reports[label].append(replay_phase_k(topic, rows, decoded, execution=execution, model=model))
             i, o = map(Decimal, RATES[model])
             fees[label]["estimated_cny"] = str((i * fees[label]["prompt_tokens"]
                                                + o * fees[label]["completion_tokens"]) / 1_000_000)
         execution.check()
+    except BenchmarkStructureError:
+        raise
     except (ClassificationError, ControlError, KeyError, TypeError, ValueError, AttributeError, OSError):
         raise ControlError("Benchmark stopped. Check reservations and provider billing before any new authorization.") from None
     return BenchmarkSession(raw_outputs, reports, identities, fees, deadline)

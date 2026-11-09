@@ -241,8 +241,8 @@ def map_response(raw, rows):
     return [(row, mapped.get(key)) for key, row in expected.items()]
 
 
-def process_batch_comment(raw, row):
-    """Only an equivalent display spelling is normalized, in its own field."""
+def normalize_batch_wire(raw):
+    """Normalize the existing equivalent spelling before evidence validation."""
     canonical = copy.deepcopy(raw)
     changes = []
     if isinstance(canonical, dict) and isinstance(canonical.get("facts"), list):
@@ -250,6 +250,11 @@ def process_batch_comment(raw, row):
             if isinstance(fact, dict) and fact.get("kind") == "Usage Scenario":
                 fact["kind"] = "usage_scenario"
                 changes.append({"path": ["facts", index, "kind"], "from": "Usage Scenario", "to": "usage_scenario"})
+    return canonical, changes
+
+
+def process_batch_comment(raw, row):
+    canonical, changes = normalize_batch_wire(raw)
     result = process_evidence_analysis(canonical, row)
     if changes:
         result["wire_raw"] = raw
