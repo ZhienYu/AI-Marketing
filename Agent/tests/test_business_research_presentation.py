@@ -28,8 +28,10 @@ class BusinessResearchPresentationTests(unittest.TestCase):
         self.assertEqual(len(group.children), 3)
         self.assertEqual({item.title: len(item.sources) for item in view.information_types},
                          {"亲身使用问题": 2, "第三方转述": 1})
-        self.assertTrue(any(item.title == "通话" and item.badge.startswith("转述") for item in view.scenarios))
-        self.assertFalse(any(item.business_meaning for item in view.summary))
+        self.assertFalse(view.scenarios)
+        self.assertTrue(any(item.title == "通话质量反馈" and item.badge.startswith("转述")
+                            for item in view.needs))
+        self.assertTrue(all(item.business_meaning for item in view.summary))
 
     def test_pricing_roles_remain_distinct(self):
         items = tuple(ReportItem(title, "", ("S01",)) for title in (
@@ -57,14 +59,21 @@ class BusinessResearchPresentationTests(unittest.TestCase):
         refs = {source.comment_id: source.label for source in after.sources}
         self.assertEqual(set(next(item for item in after.summary if item.title == "听音乐时断音").sources),
                          {refs["mock-1"], refs["mock-2"]})
-        self.assertTrue(all(not item.business_meaning for item in after.summary))
+        self.assertTrue(1 <= len(after.summary) <= 3)
+        self.assertTrue(all(item.business_meaning for item in after.summary))
         direction = next(item for item in after.opportunities if item.title == "说清功能使用条件")
         self.assertEqual(set(direction.sources), {refs["mock-4"], refs["mock-5"]})
-        self.assertIn("不能证明需要付费", direction.detail)
+        self.assertIn("不能证明需要付费", direction.evidence_limit)
+        self.assertTrue(direction.observation and direction.business_meaning)
         self.assertTrue(any(item.title == "购买成交价" for item in after.purchase))
         self.assertTrue(any(item.title == "连接手机听歌" for item in after.scenarios))
         self.assertNotIn("连接手机听歌", {item.title for item in after.purchase})
         self.assertFalse(any(item.badge == "原文对比" for item in after.competitors))
+        choice = next(item for item in after.competitors if item.badge == "原文选购候选")
+        quote = next(item for item in after.purchase if item.title.endswith("候选对照"))
+        self.assertEqual(choice.sources, quote.sources)
+        self.assertIn("$89 / $69", quote.detail)
+        self.assertNotIn("$89 / $69", choice.detail)
 
     def test_history_requires_local_manifest_and_valid_archive_retention(self):
         with TemporaryDirectory() as root:

@@ -35,6 +35,8 @@ class ReportItem:
     sources: tuple[str, ...]
     badge: str = ""
     business_meaning: str = ""
+    observation: str = ""
+    evidence_limit: str = ""
 
 
 @dataclass(frozen=True)

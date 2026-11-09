@@ -54,12 +54,30 @@
 
     const dialog = root.querySelector("dialog");
     const closeButton = dialog.querySelector("button");
-    let opener;
+    let opener, returnTarget;
+    const reveal = target => {
+      for (let parent = target.parentElement; parent && parent !== root; parent = parent.parentElement) {
+        if (parent.tagName === "DETAILS") parent.open = true;
+      }
+      target.focus({preventScroll:true});
+      target.scrollIntoView({block:"start"});
+    };
     root.addEventListener("click", event => {
       const topic = event.target.closest("[data-topic]");
       if (topic && root.contains(topic)) {
         event.preventDefault();
         activateTopic(topic.dataset.topic);
+        return;
+      }
+      const finding = event.target.closest("[data-finding]");
+      if (finding) {
+        const target = root.querySelector(finding.getAttribute("href"));
+        if (!target) return;
+        event.preventDefault();
+        if (dialog.open) {
+          returnTarget = target;
+          dialog.close();
+        } else reveal(target);
         return;
       }
       const link = event.target.closest("[data-evidence]");
@@ -83,7 +101,10 @@
     });
     dialog.addEventListener("close", () => {
       dialog.querySelector("[data-dialog-content]").replaceChildren();
-      opener?.focus({preventScroll:true});
+      if (returnTarget) {
+        reveal(returnTarget);
+        returnTarget = undefined;
+      } else opener?.focus({preventScroll:true});
     });
   }
 })();

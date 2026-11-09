@@ -98,8 +98,6 @@ def _scenarios(needs, purchase, competitors):
     scenarios = []
     tasks = {
         "连接手机听歌": ("连接手机听歌", "用途自述", None),
-        "听音乐时断音": ("听音乐", "该场景下的问题", "场景关联的问题是播放中断。"),
-        "通话质量反馈": ("通话", "转述的通话反馈", "通话质量由评论者转述，保留为他人反馈。"),
         "适用面积": ("按房间大小选购", "计划使用条件", None),
         "长时间佩戴": ("长时间佩戴", "用途自述", None),
     }
@@ -125,60 +123,84 @@ def _merge(items):
 
 
 RESEARCH = (
-    ("核实听音乐时的连接稳定性", ("听音乐时断音",),
-     "评论中的断音有明确的听歌场景，可用于界定复现范围。",
-     "对照播放设备、连接条件和操作步骤复现。原文无法确认原因或发生率。"),
-    ("试戴体验与贴合信息", ("佩戴贴合感", "密封不合适后退货"),
-     "这些评论描述了佩戴适配问题，可以用来设计试戴测试。",
-     "比较试戴提示和耳塞尺寸选择是否有助于判断适配。当前样本无法估计退货率。"),
-    ("说清功能使用条件", ("功能使用条件",),
-     "评论者询问使用功能需要满足哪些条件。",
-     "先核对原文涉及的订阅或协议，再验证选购页能否解释清楚。咨询本身不能证明需要付费。"),
-    ("区分售价与后续使用成本", ("滤芯获取与费用", "电池老化后的维修与换新"),
-     "相关评论提到了使用一段时间后仍可能发生的支出。",
-     "分别核对整机售价、适用耗材或维修选项，再了解这些信息如何影响选购。实际费用和接受范围仍待核实。"),
+    ("听歌时会在哪些情况下断音？", ("听音乐时断音",), (),
+     "有评论者说听歌时遇到断音。",
+     "可把听歌场景列入连接稳定性研究。",
+     "记录断音时的播放设备和连接方式，核对哪些情况会反复出现。",
+     "现有评论无法判断断音的原因或发生频率。"),
+    ("买前怎样判断戴起来是否合适？", ("佩戴贴合感", "密封不合适后退货"), ("试戴能否提前发现密封问题？",),
+     "有评论者描述了不满意的佩戴感受或贴合问题。",
+     "买前能否判断耳机戴起来是否合适，值得通过试戴了解。",
+     "请试戴者比较不同尺寸，并观察尺寸说明能否帮助他们选到合适的一款。",
+     "现有评论无法说明佩戴问题有多常见，也无法估计退货率。"),
+    ("说清功能使用条件", ("功能使用条件",), ("功能要付费吗？",),
+     "有评论者询问使用功能前是否有额外条件。",
+     "功能条件是否说清楚，会影响买家能否比较产品。",
+     "核对实际要求，再请买家在选购页找答案，记录哪里难找或容易误解。",
+     "咨询本身不能证明需要付费或同意协议。"),
+    ("买前能否看清后续使用成本？", ("滤芯获取与费用", "电池老化后的维修与换新"),
+     ("买家会怎样权衡换电池和换新？", "在选购页并列整机与替换滤芯费用"),
+     "有评论提到使用一段时间后可能发生的支出。",
+     "售价之外的支出，可能也是买家衡量产品是否划算的依据。",
+     "把已核对的售价和相关后续费用放在一起，请买家说明哪些信息会影响选择。",
+     "实际费用及买家的接受范围仍待核实。"),
 )
 
 
 def _opportunities(findings, existing):
-    items, used_titles = [], set()
-    equivalent = {"试戴能否提前发现密封问题？", "功能要付费吗？",
-                  "买家会怎样权衡换电池和换新？", "在选购页并列整机与替换滤芯费用"}
-    for title, signals, meaning, action in RESEARCH:
+    items, covered = [], {}
+    for title, signals, aliases, observation, meaning, action, limit in RESEARCH:
         sources = _items_by_source(item for item in findings if item.title in signals
                                    or (item.title.startswith("使用功能前是否需要") and "功能使用条件" in signals))
         if sources:
             badge = "多条评论支持 · 待验证" if len(sources) > 1 else "单条来源 · 探索性机会"
-            items.append(ReportItem(title, action, sources, badge, meaning))
-            used_titles.add(title)
-    items.extend(item for item in existing if item.title not in used_titles | equivalent)
+            items.append(ReportItem(title, action, sources, badge, meaning, observation, limit))
+            for alias in (title, *aliases):
+                covered[alias] = set(sources)
+    items.extend(item for item in existing if not set(item.sources) <= covered.get(item.title, set()))
     return _merge(items)[:6]
+
+
+def _summary_meaning(item):
+    if item.title.startswith("使用功能前是否需要"):
+        return "可检查买家在下单前能否看懂功能的使用条件。"
+    if item.badge == "原文选购候选":
+        return "可用来检查购买比较信息是否覆盖评论者考虑的产品。"
+    focus = {
+        "听音乐时断音": "听歌是评估播放稳定性的一个具体场景。",
+        "佩戴贴合感": "佩戴感是这位使用者评价产品的一项因素。",
+        "密封不合适后退货": "可检查试戴或尺寸说明能否帮助买家提前发现不合适。",
+        "明确预算上限": "这一金额适合解释这次选购约束，无法用作市场定价目标。",
+        "适用面积": "选购信息可用清楚的面积条件帮助买家筛选。",
+        "预算内除尘": "可研究预算有限的买家如何看待基础除尘能力。",
+    }
+    return focus.get(item.title, item.business_meaning)
 
 
 def _summary(findings, sources):
     validated = {source.label for source in sources if source.analysis_status == "validated"}
-    eligible = [item for item in findings if item.detail and not item.detail.startswith(
-        ("原文示例", "展开来源", "请查看来源")) and "未进一步分类" not in item.title
+    eligible = [item for item in findings if _summary_meaning(item) and item.detail and not item.detail.startswith(
+        ("原文示例", "展开来源", "请查看来源", "具体描述见")) and "未进一步分类" not in item.title
         and "提及，角色未确认" not in item.detail]
     def score(item):
         quality = 2 if set(item.sources) & validated else 0
         decision = 3 if _consumer_type(item) in {"亲身使用问题", "明确需求", "购买咨询", "正面偏好"} else 0
         specificity = 2 if item.title not in FAMILY_BY_TOPIC or item.title.startswith("使用功能前") else 0
-        return quality + decision + specificity + min(len(item.sources), 3)
+        consequence = 2 if item.title == "密封不合适后退货" else 0
+        return quality + decision + specificity + consequence + min(len(item.sources), 3)
     ranked = sorted(eligible, key=score, reverse=True)
     selected, families = [], set()
     # Reserve one place for a supported recurring finding when available, then
-    # retain concrete one-off findings without repeating a topic or a source.
+    # retain concrete one-off findings without repeating a topic.
     first = next((item for item in ranked if len(item.sources) > 1), None)
     ordered = [first] + ranked if first else ranked
     for item in ordered:
         family, _ = topic_family(item.title)
-        if (family in families or item in selected
-                or any(set(item.sources) == set(other.sources) for other in selected)):
+        if family in families or item in selected:
             continue
         families.add(family)
         selected.append(item)
-        if len(selected) == 4:
+        if len(selected) == 3:
             break
     summary = []
     for item in selected:
@@ -186,9 +208,13 @@ def _summary(findings, sources):
         if item.title == "听音乐时断音":
             detail = ("多条评论自述在听音乐时遇到声音中断。" if len(item.sources) > 1
                       else "有评论者自述在听音乐时遇到声音中断。")
+        elif item.title == "佩戴贴合感":
+            detail = "有评论者不喜欢耳机戴在耳中的感觉。"
         elif item.title.startswith("使用功能前是否需要"):
-            detail = "原文提出的是功能使用条件的疑问，尚无法确认实际要求。"
-        summary.append(replace(item, detail=detail, business_meaning=""))
+            detail = "有评论者在选购时询问功能的使用条件，实际要求仍待核实。"
+        elif item.badge == "原文选购候选" and "候选报价分别为" in detail:
+            detail = "有评论者把这几款产品列为备选，并提供了各自的报价。"
+        summary.append(replace(item, detail=detail, business_meaning=_summary_meaning(item)))
     return tuple(summary)
 
 
@@ -208,6 +234,10 @@ def upgrade_phase_k(report, topics):
         replace(item, title=f"{item.title} · 候选对照", badge="选购咨询")
         for item in competitors if item.badge == "原文选购候选" and "候选报价分别为" in item.detail
     )
+    quoted_choices = {item for item in competitors if item.badge == "原文选购候选"
+                      and "候选报价分别为" in item.detail}
+    competitors = tuple(replace(item, detail="评论者在这些产品之间征求建议。报价见购买决策因素。")
+                        if item in quoted_choices else item for item in competitors)
     types = defaultdict(set)
     for item in findings:
         if label := _consumer_type(item):
