@@ -5,6 +5,8 @@ An AI-powered tool for consumer insights and competitive intelligence.
 ## Project Status
 MVP Development
 
+当前 Comment Only 稳定版本与 Video Enhanced 独立工作目录见[本地版本指南](docs/LOCAL_VERSIONS.md)。
+
 ## 本地关键词 → Product Insight Report
 
 从仓库根目录启动（8502 是本地端口，如果被占用可换成 8503）。

@@ -10,3 +10,6 @@ venv/
 *.pem
 Agent/config/research_access.json
 Agent/.runtime/
+
+# Private Phase J source inventory
+Agent/model_benchmark_manifest.json
